@@ -235,7 +235,7 @@ class TestSpanningTree(unittest.TestCase):
             b'neighbor1'
         ]
 
-        tree = spanningtree.LocalTree(node_id)
+        tree = spanningtree.LocalTree(node_id=node_id)
 
         assert tree.parent_id != parent_id
         tree.set_parent(parent_id, {'salt': token_bytes(8).hex()})

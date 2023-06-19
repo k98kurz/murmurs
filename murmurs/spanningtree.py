@@ -4,6 +4,7 @@ from .interfaces import CanJsonSerialize
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Callable
+from uuid import uuid4
 import json
 
 
@@ -22,7 +23,8 @@ class SpanningTreeEvent(Enum):
 
 @dataclass
 class LocalTree:
-    id: bytes = field(default=b'')
+    id: bytes = field(default_factory=lambda: uuid4().bytes)
+    node_id: bytes = field(default=b'')
     parent_id: bytes = field(default = b'')
     child_ids: list[bytes] = field(default_factory=list)
     neighbor_ids: set[bytes] = field(default_factory=set)
