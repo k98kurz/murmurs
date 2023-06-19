@@ -2,6 +2,16 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
+class CanJsonSerialize(Protocol):
+    def to_json(self) -> str:
+        ...
+
+    @classmethod
+    def from_json(cls, data: str) -> None:
+        ...
+
+
+@runtime_checkable
 class CanSendMessages(Protocol):
     def send(self, message: bytes, to: bytes) -> None:
         ...
