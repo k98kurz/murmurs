@@ -119,7 +119,12 @@ class LocalTree:
         )
 
         if child_id not in self.child_ids:
-            self.child_ids.append(child_id)
+            # reuse indices of former children
+            if b'' in self.child_ids:
+                index = self.child_ids.index(b'')
+                self.child_ids[index] = child_id
+            else:
+                self.child_ids.append(child_id)
         if child_data:
             self.child_data[child_id] = child_data
 
