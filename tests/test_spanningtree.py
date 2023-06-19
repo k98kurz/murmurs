@@ -10,6 +10,66 @@ class TestSpanningTree(unittest.TestCase):
         assert issubclass(spanningtree.SpanningTreeEvent, Enum)
         assert hasattr(spanningtree, 'LocalTree')
 
+    def test_LocalTree_set_parent_works(self):
+        parent_id = b'parent'
+        node_id = b'some node'
+        tree = spanningtree.LocalTree(node_id=node_id)
+
+        assert not tree.parent_id
+        assert not tree.parent_data
+        tree.set_parent(parent_id, {'id': parent_id})
+        assert tree.parent_id == parent_id
+        assert 'id' in tree.parent_data and tree.parent_data['id'] == parent_id
+
+    def test_LocalTree_add_child_and_remove_child_work(self):
+        node_id = b'some node'
+        child_id = b'child'
+        tree = spanningtree.LocalTree(node_id=node_id)
+
+        assert not tree.child_ids
+        assert not tree.child_data
+        tree.add_child(child_id, {'id': child_id})
+        assert child_id in tree.child_ids
+        assert child_id in tree.child_data
+        assert 'id' in tree.child_data[child_id]
+        assert tree.child_data[child_id]['id'] == child_id
+        tree.remove_child(child_id)
+        assert child_id not in tree.child_ids
+        assert child_id not in tree.child_data
+
+    def test_LocalTree_reuses_child_indices(self):
+        node_id = b'some node'
+        child_id1 = b'child1'
+        child_id2 = b'child2'
+        child_id3 = b'child3'
+        tree = spanningtree.LocalTree(node_id=node_id)
+        tree.add_child(child_id1)
+        index1 = tree.child_ids.index(child_id1)
+        tree.add_child(child_id2)
+        index2 = tree.child_ids.index(child_id2)
+        tree.remove_child(child_id1)
+        tree.add_child(child_id3)
+        index3 = tree.child_ids.index(child_id3)
+
+        assert index1 != index2
+        assert index1 == index3
+
+    def test_LocalTree_add_neighbor_and_remove_neighbor_work(self):
+        neighbor_id = b'neighbor'
+        node_id = b'some node'
+        tree = spanningtree.LocalTree(node_id=node_id)
+
+        assert neighbor_id not in tree.neighbor_ids
+        assert neighbor_id not in tree.neighbor_data
+        tree.add_neighbor(neighbor_id, {'id': neighbor_id})
+        assert neighbor_id in tree.neighbor_ids
+        assert neighbor_id in tree.neighbor_data
+        assert 'id' in tree.neighbor_data[neighbor_id]
+        assert tree.neighbor_data[neighbor_id]['id'] == neighbor_id
+        tree.remove_neighbor(neighbor_id)
+        assert neighbor_id not in tree.neighbor_ids
+        assert neighbor_id not in tree.neighbor_data
+
     def test_LocalTree_add_hook_executes_multiple_handlers_in_order(self):
         info = {
             'count': 0,
