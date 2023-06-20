@@ -5,6 +5,7 @@ from .spanningtree import LocalTree, SpanningTreeEvent
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from math import ceil, floor, log2
 from secrets import token_bytes
 from typing import Callable, Optional
 from uuid import uuid4
@@ -90,6 +91,83 @@ def set_send_message_func(func: Callable[[PIEMessage], None]) -> None:
     """
     tert(callable(func), 'func must be Callable[[PIEMessage], None]')
     _functions['send_message'] = func
+
+
+def signed_int_to_bytes(number: int) -> bytes:
+    """Convert from arbitrarily large signed int to bytes."""
+    tert(type(number) is int, 'number must be int')
+    negative = number < 0
+    number = abs(number)
+    n_bits = floor(log2(number)) + 1 if number != 0 else 1
+    n_bytes = ceil(n_bits/8)
+
+    if negative:
+        if n_bits % 8 == 0 and number > 2**(n_bytes*8-1):
+            n_bytes += 1
+        number = (1 << (n_bytes * 8 - 1)) + (2**(n_bytes * 8 - 1) - number)
+    elif n_bits % 8 == 0:
+        n_bytes += 1
+
+    return number.to_bytes(n_bytes, 'big')
+
+def int_to_2_bytes(number: int) -> bytes:
+    """Convert from arbitrarily large signed int to bytes."""
+    tert(type(number) is int, 'number must be int')
+    negative = number < 0
+    number = abs(number)
+    n_bytes = 2
+
+    if negative:
+        number = (1 << (n_bytes * 8 - 1)) + (2**(n_bytes * 8 - 1) - number)
+
+    return number.to_bytes(n_bytes, 'big')
+
+def bytes_to_int(number: bytes) -> int:
+    """Convert from bytes to a signed int."""
+    tert(type(number) is bytes, 'number must be bytes')
+    vert(len(number) > 0, 'number must not be empty')
+    size = len(number) * 8
+    number = int.from_bytes(number, 'big')
+    negative = number >> (size - 1)
+
+    return number - 2**size if negative else number
+
+
+def encode_coordinates(coordinates: list[int]) -> bytes:
+    """Encodes coordinates into a reasonably compact bytes format."""
+    coords = [int_to_2_bytes(c) for c in coordinates]
+    return b''.join(coords)
+
+def decode_coordinates(encoded: bytes) -> list[int]:
+    """Decodes coordinates from a reasonably compact bytes format."""
+    tert(type(encoded) is bytes, 'encoded must be bytes of len%2=0')
+    vert(len(encoded) % 2 == 0, 'encoded must be bytes of len%2=0')
+    coords = []
+    index = 0
+
+    while index < len(encoded):
+        coords.append(encoded[index:index+2])
+        index += 2
+
+    return [bytes_to_int(c) for c in coords]
+
+def encode_big_coordinates(coordinates: list[int]) -> bytes:
+    """Encodes coordinates into an adaptive bytes format."""
+    coords = [signed_int_to_bytes(c) for c in coordinates]
+    coords = [len(c).to_bytes(1, 'big') + c for c in coords]
+    return b''.join(coords)
+
+def decode_big_coordinates(encoded: bytes) -> list[int]:
+    """Decodes coordinates from an adaptive bytes format."""
+    coords = []
+    index = 0
+
+    while index < len(encoded):
+        size = encoded[index]
+        coords.append(encoded[index+1:index+1+size])
+        index += 1 + size
+
+    return [bytes_to_int(c) for c in coords]
 
 
 class PIETree:
@@ -362,17 +440,18 @@ class PIETree:
         tert(all(type(c) is int for c in parent_coords),
              'parent_coords must be list of ints')
         tert(type(index) is str, 'index must be str binary representaiton')
-        tert(type(link_weight) is int, 'link_weight must be int')
-        local_coords = [
+        tert(type(link_weight) is int, 'link_weight must be int >0')
+        vert(link_weight > 0, 'link_weight must be int >0')
+        new_coords = [
             (coord + link_weight) if coord > 0 else (coord - link_weight)
             for coord in parent_coords
         ]
         for bit in list(index):
             if bit == '0':
-                local_coords.append(-link_weight)
+                new_coords.append(-link_weight)
             else:
-                local_coords.append(link_weight)
-        return local_coords
+                new_coords.append(link_weight)
+        return new_coords
 
     def to_json(self) -> str:
         """Returns a json str encoding the instance data."""
