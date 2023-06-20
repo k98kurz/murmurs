@@ -13,3 +13,8 @@ def tert(condition: bool, message: str = '') -> None:
     if condition:
         return
     raise TypeError(message)
+
+
+class UnicastException(BaseException):
+    def __init__(self, peer_id: bytes, *args: object) -> None:
+        super().__init__(f"could not unicast to peer_id={peer_id.hex()}", *args)

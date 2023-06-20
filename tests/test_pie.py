@@ -101,5 +101,127 @@ class TestPIEFunctions(unittest.TestCase):
         assert pie.decode_big_coordinates(encoded2) == coords2
 
 
+class TestPIEMessage(unittest.TestCase):
+    def test_encode_header_and_decode_header_e2e(self):
+        treeid = b'some tree'
+        dst = [5, -4, 3, -2, 2, 1]
+        src = [4, 3, -3, -2, 1, -1]
+        bifurcations = [
+            [5, -4, -3, 2, -1],
+            [-5, -4, -3, 2, -1],
+        ]
+        body = b'hello world'
+        msg = pie.PIEMessage(
+            pie.PIEMsgType.PACKET,
+            treeid,
+            dst,
+            src,
+            bifurcations,
+            body
+        )
+
+        encoded = msg.encode_header()
+        assert type(encoded) is bytes
+        assert len(encoded)
+
+        decoded = pie.PIEMessage.decode_header(encoded)
+        assert type(decoded) is tuple
+        assert decoded[0] == pie.PIEMsgType.PACKET
+        assert decoded[1] == treeid
+        assert decoded[2] == dst
+        assert decoded[3] == src
+        assert decoded[4] == bifurcations
+
+    def test_encode_header_and_decode_header_with_big_coords_e2e(self):
+        treeid = b'some tree'
+        dst = [5, -4, 3, -2, 2, 1]
+        src = [4, 3, -3, -2, 1, -1]
+        bifurcations = [
+            [5, -4, -3, 2, -1],
+            [-5, -4, -3, 2, -1],
+        ]
+        body = b'hello world'
+        msg = pie.PIEMessage(
+            pie.PIEMsgType.PACKET,
+            treeid,
+            dst,
+            src,
+            bifurcations,
+            body
+        )
+
+        encoded = msg.encode_header(True)
+        assert type(encoded) is bytes
+        assert len(encoded)
+
+        decoded = pie.PIEMessage.decode_header(encoded, True)
+        assert type(decoded) is tuple
+        assert decoded[0] == pie.PIEMsgType.PACKET
+        assert decoded[1] == treeid
+        assert decoded[2] == dst
+        assert decoded[3] == src
+        assert decoded[4] == bifurcations
+
+    def test_to_bytes_and_from_bytes_e2e(self):
+        treeid = b'some tree'
+        dst = [5, -4, 3, -2, 2, 1]
+        src = [4, 3, -3, -2, 1, -1]
+        bifurcations = [
+            [5, -4, -3, 2, -1],
+            [-5, -4, -3, 2, -1],
+        ]
+        body = b'hello world'
+        msg = pie.PIEMessage(
+            pie.PIEMsgType.PACKET,
+            treeid,
+            dst,
+            src,
+            bifurcations,
+            body
+        )
+
+        encoded = msg.to_bytes()
+        assert type(encoded) is bytes
+        assert len(encoded)
+
+        decoded = pie.PIEMessage.from_bytes(encoded)
+        assert isinstance(decoded, pie.PIEMessage)
+        assert decoded.treeid == msg.treeid
+        assert decoded.dst == msg.dst
+        assert decoded.src == msg.src
+        assert decoded.bifurcations == msg.bifurcations
+        assert decoded.body == msg.body
+
+    def test_to_bytes_and_from_bytes_with_big_coords_e2e(self):
+        treeid = b'some tree'
+        dst = [5, -4, 3, -2, 2, 1]
+        src = [4, 3, -3, -2, 1, -1]
+        bifurcations = [
+            [5, -4, -3, 2, -1],
+            [-5, -4, -3, 2, -1],
+        ]
+        body = b'hello world'
+        msg = pie.PIEMessage(
+            pie.PIEMsgType.PACKET,
+            treeid,
+            dst,
+            src,
+            bifurcations,
+            body
+        )
+
+        encoded = msg.to_bytes(True)
+        assert type(encoded) is bytes
+        assert len(encoded)
+
+        decoded = pie.PIEMessage.from_bytes(encoded, True)
+        assert isinstance(decoded, pie.PIEMessage)
+        assert decoded.treeid == msg.treeid
+        assert decoded.dst == msg.dst
+        assert decoded.src == msg.src
+        assert decoded.bifurcations == msg.bifurcations
+        assert decoded.body == msg.body
+
+
 if __name__ == '__main__':
     unittest.main()

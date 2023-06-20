@@ -1,15 +1,17 @@
 from __future__ import annotations
-from .errors import tert, vert
-from .interfaces import CanJsonSerialize
-from .spanningtree import LocalTree, SpanningTreeEvent
+from .errors import tert, vert, UnicastException
+from .interfaces import CanJsonSerialize, CanUnicast
+from .spanningtree import LocalTree
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
 from enum import Enum, auto
+from hashlib import sha256
 from math import ceil, floor, log2
 from secrets import token_bytes
-from typing import Callable, Optional
+from typing import Callable
 from uuid import uuid4
 import json
+import struct
 
 
 class PIEEvent(Enum):
@@ -41,11 +43,122 @@ class PIEMsgType(Enum):
 
 @dataclass
 class PIEMessage:
-    treeid: bytes
     msg_type: PIEMsgType
-    src: list[int]
+    treeid: bytes
     dst: list[int]
+    src: list[int]
+    bifurcations: list[list[int]]
     body: bytes
+    last_hop: list[int] = field(default=None)
+
+    def encode_header(self, use_big_coords: bool = False) -> bytes:
+        """Serialize header information to bytes."""
+        if use_big_coords:
+            src = encode_big_coordinates(self.src)
+            dst = encode_big_coordinates(self.dst)
+            bifurcations = [encode_big_coordinates(b) for b in self.bifurcations]
+        else:
+            src = encode_coordinates(self.src)
+            dst = encode_coordinates(self.dst)
+            bifurcations = [encode_coordinates(b) for b in self.bifurcations]
+
+        bifurcations = struct.pack(
+            '!B' + ''.join(['B' for _ in bifurcations]) +
+            ''.join([f'{len(b)}s' for b in bifurcations]),
+            len(bifurcations),
+            *[len(b) for b in bifurcations],
+            *[b for b in bifurcations]
+        )
+
+        return struct.pack(
+            f'!BB{len(self.treeid)}sB{len(dst)}sB{len(src)}s{len(bifurcations)}s',
+            self.msg_type.value,
+            len(self.treeid),
+            self.treeid,
+            len(dst),
+            dst,
+            len(src),
+            src,
+            bifurcations
+        )
+
+    def to_bytes(self, use_big_coords: bool = False) -> bytes:
+        """Serialize message to bytes."""
+        header = self.encode_header(use_big_coords)
+
+        return struct.pack(
+            f'!H{len(header)}sH{len(self.body)}s',
+            len(header),
+            header,
+            len(self.body),
+            self.body
+        )
+
+    @staticmethod
+    def decode_header(header: bytes, use_big_coords: bool = False) -> tuple:
+        """Decode header fields from bytes."""
+        msg_type, treeid_len, header = struct.unpack(
+            f'!BB{len(header)-2}s',
+            header
+        )
+        treeid, dst_len, header = struct.unpack(
+            f'!{treeid_len}sB{len(header)-1-treeid_len}s',
+            header
+        )
+        dst, src_len, header = struct.unpack(
+            f'!{dst_len}sB{len(header)-1-dst_len}s',
+            header
+        )
+        src, bifurcations = struct.unpack(
+            f'!{src_len}s{len(header)-src_len}s',
+            header
+        )
+        n_bifs, bifurcations = struct.unpack(
+            f'!B{len(bifurcations)-1}s',
+            bifurcations
+        )
+        bif_sizes = []
+        bifs = []
+        for _ in range(n_bifs):
+            bif_len, bifurcations = struct.unpack(
+                f'!B{len(bifurcations)-1}s',
+                bifurcations
+            )
+            bif_sizes.append(bif_len)
+        for bif_len in bif_sizes:
+            bif, bifurcations = struct.unpack(
+                f'!{bif_len}s{len(bifurcations)-bif_len}s',
+                bifurcations
+            )
+            bifs.append(bif)
+        if use_big_coords:
+            dst = decode_big_coordinates(dst)
+            src = decode_big_coordinates(src)
+            bifurcations = [decode_big_coordinates(b) for b in bifs]
+        else:
+            dst = decode_coordinates(dst)
+            src = decode_coordinates(src)
+            bifurcations = [decode_coordinates(b) for b in bifs]
+
+        return (
+            PIEMsgType(msg_type),
+            treeid,
+            dst,
+            src,
+            bifurcations
+        )
+
+    @classmethod
+    def from_bytes(cls, data: bytes, use_big_coords: bool = False) -> PIEMessage:
+        """Deserialize a message from bytes."""
+        header_len, _ = struct.unpack(f'!H{len(data)-2}s', data)
+        _, header, body_len, body = struct.unpack(
+            f'!H{header_len}sH{len(data)-header_len-4}s',
+            data
+        )
+        vert(len(body) == body_len, 'message body length mismatch')
+        msg_type, treeid, dst, src, bifurcations = cls.decode_header(header, use_big_coords)
+        return cls(msg_type, treeid, dst, src, bifurcations, body)
 
 
 _functions = {
@@ -172,15 +285,18 @@ def decode_big_coordinates(encoded: bytes) -> list[int]:
 
 class PIETree:
     id: bytes
+    config: dict|CanJsonSerialize
     skey: bytes
     tree: LocalTree
     locality_level: int
     local_coords: list[int]
     child_coords: dict[bytes, list[int]]
     neighbor_coords: dict[bytes, list[int]]
+    senders: list[CanUnicast]
     hooks: dict[str, Callable]
 
     def __init__(self, id: bytes = None,
+                 config: dict|CanJsonSerialize = {},
                  skey: bytes = None,
                  tree: LocalTree = None,
                  locality_level: int = 0,
@@ -189,6 +305,11 @@ class PIETree:
                  child_coords: dict[bytes, list[int]] = None,
                  neighbor_coords: dict[bytes, list[int]] = None) -> None:
         self.id = id if id else uuid4().bytes
+        if config:
+            if isinstance(config, CanJsonSerialize):
+                self.id = sha256(config.to_json().encode()).digest()[:16]
+            else:
+                self.id = sha256(json.dumps(config).encode()).digest()[:16]
         self.skey = skey if skey else token_bytes(32)
         self.tree = tree if tree else LocalTree(id)
         self.locality_level = locality_level
@@ -230,6 +351,12 @@ class PIETree:
         tert(type(event) is PIEEvent, 'event must be PIEEvent')
         if event.name in self.hooks:
             self.hooks[event.name](event.name, {**data, 'tree': self})
+
+    def add_sender(self, sender: CanUnicast) -> None:
+        """Add a unicast sender."""
+        tert(isinstance(sender, CanUnicast), 'sender must implement CanUnicast')
+        if sender not in self.senders:
+            self.senders.append(sender)
 
     def set_parent(self, parent_id: bytes, parent_coords: list[int],
                    index: str, weight: int = 1,
@@ -416,16 +543,64 @@ class PIETree:
             return self.receive_message(message)
 
         # forward to nearest peer
-        peers = [
-            self.child_coords
-        ]
+        peers = []
+        for cid, coords in self.child_coords.items():
+            if coords == message.last_hop:
+                continue
+            peers.append((self.calculate_distance(coords, message.dst), coords, cid))
+        for nid, coords in self.neighbor_coords.items():
+            if coords == message.last_hop:
+                continue
+            peers.append((self.calculate_distance(coords, message.dst), coords, nid))
+
+        peers.sort()
+
+        bifurcation = None
+        peer_coords = [p[1] for p in peers]
+        for coords in message.bifurcations:
+            if coords in peer_coords:
+                bifurcation = peers[peer_coords.index(coords)]
+                break
+
+        next_hop = bifurcation if bifurcation else peers[0][1:]
+
+        # invoke hook
+        self.invoke_hook(
+            PIEEvent.ROUTE_MESSAGE,
+            {
+                'message': message,
+                'next_hop': next_hop
+            }
+        )
+
+        self.send_message(message, next_hop[0], next_hop[1])
 
     def receive_message(self, message: PIEMessage) -> None:
         """Receive a message."""
-        ...
+        self.invoke_hook(PIEEvent.RECEIVE_MESSAGE, {'message': message})
+
+    def send_message(self, message: PIEMessage, coords: list[int], peer_id: bytes) -> None:
+        """Send a message to a specific peer."""
+        self.invoke_hook(
+            PIEEvent.SEND_MESSAGE,
+            {
+                'message': message,
+                'coords': coords,
+                'peer_id': peer_id
+            }
+        )
+
+        for sender in self.senders:
+            if sender.unicast(message, (peer_id, coords)):
+                return
+
+        raise UnicastException(peer_id)
 
     @staticmethod
     def calculate_distance(coords1: list[int], coords2: list[int]) -> int:
+        """Calculates the distance between two sets of coordinates using
+            the L-infinity norm.
+        """
         max_coord_index = len(coords1) if len(coords1) < len(coords2) else len(coords2)
         return max([abs(coords1[i] - coords2[i]) for i in range(max_coord_index)])
 
