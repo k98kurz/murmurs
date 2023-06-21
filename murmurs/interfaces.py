@@ -18,7 +18,7 @@ class CanJsonSerialize(Protocol):
 @runtime_checkable
 class CanUnicast(Protocol):
     """Interface for classes that can handle unicast message sending."""
-    def unicast(self, message: Any, dst: Any) -> bool:
+    def unicast(self, message: Any, dst: Any, route_data: Any = None) -> bool:
         """Returns True if the message can be sent to the dst and False
             otherwise.
         """

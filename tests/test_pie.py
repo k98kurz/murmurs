@@ -1,4 +1,4 @@
-from context import pie
+from context import errors, pie, spanningtree
 import unittest
 
 
@@ -221,6 +221,136 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded.src == msg.src
         assert decoded.bifurcations == msg.bifurcations
         assert decoded.body == msg.body
+
+
+class TestPIETree(unittest.TestCase):
+    def test_set_hook_replaces_hook(self):
+        tree = pie.PIETree()
+        signal = {}
+        def hook1(event_name: str, data: dict):
+            signal['event'] = event_name
+            signal['data'] = data
+        def hook2(event_name: str, data: dict):
+            signal['event'] = 'replaced'
+            signal['data'] = 'replaced'
+        tree.set_hook(pie.PIEEvent.RECEIVE_MESSAGE, hook1)
+
+        assert 'event' not in signal
+        assert 'data' not in signal
+        tree.invoke_hook(pie.PIEEvent.RECEIVE_MESSAGE, {'some_data': 'whatever'})
+        assert 'event' in signal
+        assert 'data' in signal
+        assert 'some_data' in signal['data']
+        assert 'tree' in signal['data']
+        assert signal['data']['tree'] is tree
+
+        tree.set_hook(pie.PIEEvent.RECEIVE_MESSAGE, hook2)
+        tree.invoke_hook(pie.PIEEvent.RECEIVE_MESSAGE, {})
+        assert signal['event'] == 'replaced'
+        assert signal['data'] == 'replaced'
+
+    def test_add_hook_executes_multiple_handlers_in_order(self):
+        tree = pie.PIETree()
+        signal = {}
+        def hook1(event_name: str, data: dict):
+            signal['event'] = 'hook1'
+            return data
+        def hook2(event_name: str, data: dict):
+            signal['data'] = data
+            return data
+        tree.add_hook(pie.PIEEvent.DELIVER_PACKET, hook1)
+        tree.add_hook(pie.PIEEvent.DELIVER_PACKET, hook2)
+
+        assert 'event' not in signal
+        assert 'data' not in signal
+        tree.invoke_hook(pie.PIEEvent.DELIVER_PACKET, {'some_data': 'whatever'})
+        assert 'event' in signal
+        assert 'data' in signal
+        assert signal['event'] == 'hook1'
+        assert signal['data']['tree'] is tree
+
+    def test_add_sender_raises_TypeError_for_instance_not_implementing_CanUnicast(self):
+        tree = pie.PIETree()
+        with self.assertRaises(TypeError) as e:
+            tree.add_sender({'not': 'CanUnicast'})
+        assert str(e.exception) == 'sender must implement CanUnicast'
+
+    def test_send_message_raises_error_if_no_sender_can_send(self):
+        tree = pie.PIETree()
+        peer_id = b'some node'
+        dst = [-2, 1]
+        message = pie.PIEMessage(
+            pie.PIEMsgType.ECHO,
+            tree.id,
+            dst,
+            [-3, 2, 1],
+            [],
+            b'olleh'
+        )
+
+        with self.assertRaises(errors.UnicastException) as e:
+            tree.send_message(message, [-2, 1], peer_id)
+        assert str(e.exception) == f'could not unicast to peer_id={peer_id.hex()}'
+
+    def test_add_sender_causes_sender_unicast_to_be_invoked_on_send(self):
+        class Sender:
+            sent: list[pie.PIEMessage]
+            def __init__(self) -> None:
+                self.sent = []
+            def unicast(self, message: pie.PIEMessage, dst: list[int], route_data: dict = None) -> bool:
+                self.sent.append(message)
+                return True
+        sender = Sender()
+
+        tree = pie.PIETree()
+        peer_id = b'some node'
+        dst = [-2, 1]
+        message = pie.PIEMessage(
+            pie.PIEMsgType.ECHO,
+            tree.id,
+            dst,
+            [-3, 2, 1],
+            [],
+            b'olleh'
+        )
+        tree.add_sender(sender)
+        assert not len(sender.sent)
+        tree.send_message(message, dst, peer_id)
+        assert len(sender.sent)
+        assert sender.sent == [message]
+
+    def test_set_parent_sets_parent_and_invokes_hooks(self):
+        signal = {}
+        def hook1(event, data) -> dict:
+            signal['hook1'] = event
+            return data
+        def hook2(event, data) -> dict:
+            signal['hook2'] = event
+            return data
+        def hook3(event, data) -> dict:
+            signal['hook3'] = event
+            return data
+        def hook4(event, data) -> dict:
+            signal['hook4'] = event
+            return data
+
+        tree = pie.PIETree()
+        tree.add_hook(pie.PIEEvent.BEFORE_SET_PARENT, hook1)
+        tree.add_hook(pie.PIEEvent.AFTER_SET_PARENT, hook3)
+        tree.tree.add_hook(spanningtree.SpanningTreeEvent.BEFORE_SET_PARENT, hook2)
+        tree.tree.add_hook(spanningtree.SpanningTreeEvent.AFTER_SET_PARENT, hook4)
+
+        assert 'hook1' not in signal
+        assert 'hook2' not in signal
+        assert 'hook3' not in signal
+        assert 'hook4' not in signal
+        assert tree.tree.parent_id != b'parent'
+        tree.set_parent(b'parent', [-1], '101')
+        assert 'hook1' in signal
+        assert 'hook2' in signal
+        assert 'hook3' in signal
+        assert 'hook4' in signal
+        assert tree.tree.parent_id == b'parent'
 
 
 if __name__ == '__main__':

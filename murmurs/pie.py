@@ -15,7 +15,9 @@ import struct
 
 
 class PIEEvent(Enum):
+    """Events for hooks on the PIETree."""
     RECEIVE_MESSAGE = auto()
+    DELIVER_PACKET = auto()
     SEND_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
     BEFORE_SET_PARENT = auto()
@@ -31,14 +33,16 @@ class PIEEvent(Enum):
 
 
 class PIEMsgType(Enum):
+    """Valid message types."""
     PACKET = 0
     HELLO = 1
-    ECHO = 2
-    TRACE_ROUTE = 3
-    SET_ROOT = 4
-    OFFER_ASSIGNMENT = 5
-    ACCEPT_ASSIGNMENT = 6
-    ANNOUNCE_ASSIGNMENT = 7
+    PING = 2
+    ECHO = 3
+    TRACE_ROUTE = 4
+    SET_ROOT = 5
+    OFFER_ASSIGNMENT = 6
+    ACCEPT_ASSIGNMENT = 7
+    ANNOUNCE_ASSIGNMENT = 8
 
 
 @dataclass
@@ -159,6 +163,12 @@ class PIEMessage:
         vert(len(body) == body_len, 'message body length mismatch')
         msg_type, treeid, dst, src, bifurcations = cls.decode_header(header, use_big_coords)
         return cls(msg_type, treeid, dst, src, bifurcations, body)
+
+
+@dataclass
+class HelloBody:
+    peerid: bytes
+    coords: list[int]
 
 
 _functions = {
@@ -318,6 +328,7 @@ class PIETree:
         self.local_coords = local_coords or []
         self.child_coords = child_coords or {}
         self.neighbor_coords = neighbor_coords or {}
+        self.senders = []
         self.hooks = {}
 
     def set_hook(self, event: PIEEvent,
@@ -558,7 +569,7 @@ class PIETree:
         bifurcation = None
         peer_coords = [p[1] for p in peers]
         for coords in message.bifurcations:
-            if coords in peer_coords:
+            if coords in peer_coords and coords != message.last_hop:
                 bifurcation = peers[peer_coords.index(coords)]
                 break
 
@@ -579,6 +590,20 @@ class PIETree:
         """Receive a message."""
         self.invoke_hook(PIEEvent.RECEIVE_MESSAGE, {'message': message})
 
+        # handle protocol events
+        match message.msg_type:
+            case PIEMsgType.PACKET:
+                # this was the destination
+                self.invoke_hook(
+                    PIEEvent.DELIVER_PACKET,
+                    {
+                        'message': message
+                    }
+                )
+            case PIEMsgType.HELLO:
+                # peer information
+                ...
+
     def send_message(self, message: PIEMessage, coords: list[int], peer_id: bytes) -> None:
         """Send a message to a specific peer."""
         self.invoke_hook(
@@ -591,7 +616,7 @@ class PIETree:
         )
 
         for sender in self.senders:
-            if sender.unicast(message, (peer_id, coords)):
+            if sender.unicast(message, peer_id):
                 return
 
         raise UnicastException(peer_id)

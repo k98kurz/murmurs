@@ -63,7 +63,7 @@ class LocalTree:
         """Invokes the hooks if present for the event, passing data."""
         tert(type(event) is SpanningTreeEvent, 'event must be SpanningTreeEvent')
         if event.name in self.hooks:
-            self.hooks[event.name](event.name, {**data, 'tree': self})
+            self.hooks[event.name](event, {**data, 'tree': self})
 
     def set_parent(self, parent_id: bytes,
                    parent_data: dict|CanJsonSerialize = None) -> None:
