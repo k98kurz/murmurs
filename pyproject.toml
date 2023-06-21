@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "murmurs"
+version = "0.0.1"
+authors = [
+  { name="k98kurz", email="k98kurz@gmail.com" },
+]
+description = "Networking package with gossip and greedy routing (PIE, VOUTE, and SpeedyMurmurs)"
+readme = "readme.md"
+requires-python = ">=3.9"
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: ISC License (ISCL)",
+  "Operating System :: OS Independent",
+  "Topic :: Security :: Cryptography",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: System :: Networking"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/k98kurz/murmurs"
+"Bug Tracker" = "https://github.com/k98kurz/murmurs/issues"
