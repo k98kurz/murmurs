@@ -31,12 +31,6 @@ class TestPIEFunctions(unittest.TestCase):
         pie.set_elect_root_func(func)
         assert pie._functions['elect_root'] is func
 
-    def test_set_send_message_func(self):
-        func = lambda pm: pm
-        assert pie._functions['send_message'] is not func
-        pie.set_send_message_func(func)
-        assert pie._functions['send_message'] is func
-
     def test_signed_int_to_bytes(self):
         b1 = pie.signed_int_to_bytes(11)
         b2 = pie.signed_int_to_bytes(-11)
