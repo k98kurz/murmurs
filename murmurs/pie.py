@@ -27,6 +27,11 @@ class PIEEvent(Enum):
     RECEIVE_TRACE_ROUTE = auto()
     RECEIVE_TRACE_ROUTE_ECHO = auto()
     RECEIVE_SET_ROOT = auto()
+    RECEIVE_OFFER_ASSIGNMENT = auto()
+    RECEIVE_REQUEST_ASSIGNMENT = auto()
+    RECEIVE_ANNOUNCE_ASSIGNMENT = auto()
+    RECEIVE_RELEASE_ASSIGNMENT = auto()
+    SET_ROOT = auto()
     SEND_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
     BEFORE_SET_PARENT = auto()
@@ -276,7 +281,6 @@ _functions = {
     'sign': None,
     'check_sig': None,
     'elect_root': None,
-    'send_message': None,
 }
 
 
@@ -307,14 +311,6 @@ def set_elect_root_func(func: Callable[[bytes, bytes, int], bool]) -> None:
     """
     tert(callable(func), 'func must be Callable[[bytes, bytes, int], bool]')
     _functions['elect_root'] = func
-
-
-def set_send_message_func(func: Callable[[PIEMessage], None]) -> None:
-    """Sets a function for sending a message. Function must take the
-        PIEMessage message as an arg.
-    """
-    tert(callable(func), 'func must be Callable[[PIEMessage], None]')
-    _functions['send_message'] = func
 
 
 def signed_int_to_bytes(number: int) -> bytes:
@@ -440,6 +436,7 @@ class PIETree:
     tree: LocalTree
     locality_level: int
     local_coords: list[int]
+    assignment_cert: bytes
     child_coords: dict[bytes, list[int]]
     neighbor_coords: dict[bytes, list[int]]
     senders: list[CanUnicast]
@@ -462,6 +459,9 @@ class PIETree:
         if config:
             self.id = sha256(json.dumps(config).encode('utf-8')).digest()[:16]
             self.root = self.root or (config['init_root'] if 'init_root' in config else None)
+            self.config = config
+        else:
+            self.config = {}
         self.skey = skey if skey else token_bytes(32)
         self.tree = tree if tree else LocalTree(id)
         self.locality_level = locality_level
@@ -516,8 +516,12 @@ class PIETree:
                    index: str, weight: int = 1,
                    other_parent_data: dict = {}) -> None:
         """Sets the parent_id on the underlying tree. Sets local_coords
-            based upon the parent_coords and the link weight.
+            based upon the parent_coords and the link weight. Raises
+            ValueError if must_use_cert set in config but cert missing
+            from parent_data.
         """
+        if 'cert' not in other_parent_data and 'must_use_cert' in self.config:
+            raise ValueError('missing required cert')
         parent_data = {**other_parent_data, 'parent_coords': parent_coords}
         self.invoke_hook(
             PIEEvent.BEFORE_SET_PARENT,
@@ -540,6 +544,7 @@ class PIETree:
                 'cert': parent_data['cert'],
                 'coords': local_coords,
             }).encode('utf-8'))
+            self.assignment_cert = b64decode(parent_data['cert'])
         else:
             body = PIEMsgBody(json.dumps({
                 'parent_id': parent_id.hex(),
@@ -575,16 +580,16 @@ class PIETree:
         # send OFFER_ASSIGNMENT to children
         for cid in self.tree.child_ids:
             if 'cert' in parent_data:
-                body = PIEMsgBody(json.dumps({
-                    'parent_id': self.tree.node_id.hex(),
-                    'parent_coords': self.local_coords,
+                child_cert = self.make_cert({
+                    'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
+                    'coords': self.local_coords,
                     'index': self.child_index(cid),
-                    'cert': parent_data['cert']
-                }).encode('utf-8'))
+                }, base_cert=b64decode(parent_data['cert']))
+                body = PIEMsgBody(child_cert)
             else:
                 body = PIEMsgBody(json.dumps({
-                    'parent_id': self.tree.node_id.hex(),
-                    'parent_coords': self.local_coords,
+                    'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
+                    'coords': self.local_coords,
                     'index': self.child_index(cid)
                 }).encode('utf-8'))
             body.sign(self.skey)
@@ -606,6 +611,45 @@ class PIETree:
                 'parent_data': self.tree.parent_data
             }
         )
+
+    def make_cert(self, cert_data: dict, base_cert: bytes = b'') -> bytes:
+        """Makes a signed certificate."""
+        tert(callable(_functions['sign']), 'missing callable sign function')
+        cert = {**cert_data, 'signer_id': b64encode(self.tree.node_id).decode('utf-8')}
+        if base_cert:
+            cert['base'] = b64encode(base_cert).decode('utf-8')
+        cert = b64encode(json.dumps(cert).encode('utf-8'))
+        sig = _functions['sign'](cert, self.skey)
+        return json.dumps({
+            'data': cert,
+            'sig': b64encode(sig).decode('utf-8')
+        }).encode('utf-8')
+
+    def check_cert(self, cert: bytes) -> bool:
+        """Checks a certificate, traversing the parents to the root.
+            Returns True if all certs have the right structure, all
+            signatures verify, and the root is valid. Returns False
+            otherwise.
+        """
+        tert(callable(_functions['check_sig']), 'missing callable check_sig function')
+        try:
+            cert = json.loads(cert.decode('utf-8'))
+            body = cert['data'].encode('utf-8')
+            sig = b64decode(cert['sig'])
+            data = json.loads(b64decode(cert['body']).decode('utf-8'))
+            signer_id = b64decode(data['signer_id'])
+            # first check the signature
+            if not _functions['check_sig'](signer_id, body, sig):
+                return False
+            # if there is a base cert, check it
+            if 'base' in data:
+                return self.check_cert(b64decode(data['base']))
+            # otherwise make sure it was signed by the root
+            if signer_id != self.root:
+                return self.try_elect_root(signer_id)
+        except BaseException:
+            return False
+        return True
 
     def add_child(self, child_id: bytes,
                   child_data: dict = {},
@@ -786,36 +830,6 @@ class PIETree:
         message.ttl -= 1
         self.send_message(message, next_hop[0], next_hop[1])
 
-    def respond_to_trace_route(self, message: PIEMessage) -> None:
-        """Responds to a TRACE_ROUTE message."""
-        # first see if there is a path bifurcation
-        bifurcation = None
-        reverse_msg = PIEMessage(PIEMsgType.DEFAULT, self.id,
-                                    message.src, message.src_id,
-                                    message.dst, message.dst_id, b'',
-                                    flow_label=message.flow_label)
-        last_hop = self.calculate_next_hop(reverse_msg)
-        if message.last_hop:
-            if last_hop[1] != message.last_hop:
-                bifurcation = last_hop[1]
-
-        # then send a TRACE_ROUTE_ECHO to src
-        if bifurcation:
-            if 'use_big_coords' in self.config:
-                bifurcation = encode_big_coordinates(bifurcation)
-            else:
-                bifurcation = encode_coordinates(bifurcation)
-        body = PIEMsgBody(bifurcation)
-        body.sign(self.skey)
-        seq = message.seq + 255 - message.ttl
-        seq = seq if seq < 256 else 255
-        reverse_msg = PIEMessage(PIEMsgType.TRACE_ROUTE_ECHO, self.id,
-                                    message.src, message.src_id,
-                                    self.local_coords, self.tree.node_id,
-                                    body.to_bytes(), seq=seq,
-                                    flow_label=message.flow_label)
-        self.send_message(reverse_msg, last_hop[0], last_hop[1])
-
     def calculate_next_hop(self, message: PIEMessage) -> tuple[bytes, list[int]]:
         """Chooses the next hop based on the distance metric and
             bifurcations added to the header.
@@ -845,6 +859,23 @@ class PIETree:
 
         next_hop = bifurcation if bifurcation else peers[0][1:]
         return next_hop
+
+    def try_elect_root(self, new_root: bytes) -> bool:
+        """Tries to elect a new root. Returns True if successful and
+            False otherwise.
+        """
+        if _functions['elect_root']:
+            if _functions['elect_root'](self.root, new_root, self.locality_level):
+                self.invoke_hook(
+                    PIEEvent.SET_ROOT,
+                    {
+                        'old_root': self.root,
+                        'new_root': new_root
+                    }
+                )
+                self.root = new_root
+                return True
+        return False
 
     def receive_message(self, message: PIEMessage) -> None:
         """Receive a message."""
@@ -899,30 +930,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-
-                if peer_id not in self.tree.child_ids and \
-                    peer_id not in self.tree.neighbor_ids:
-                    # respond with HELLO
-                    msgbody = PIEMsgBody(json.dumps({
-                        'id': self.tree.node_id.hex(),
-                        'coords': self.local_coords
-                    }).encode('utf-8'))
-                    msgbody.sign(self.skey)
-                    try:
-                        self.send_message(PIEMessage(
-                            PIEMsgType.HELLO,
-                            self.id,
-                            message.src,
-                            message.src_id,
-                            self.local_coords,
-                            self.tree.node_id,
-                            msgbody.to_bytes(),
-                            ttl=1
-                        ), message.src_id)
-                        # add neighbor if reachable
-                        self.add_neighbor(peer_id, peer_info)
-                    except UnicastException:
-                        ...
+                self._handle_hello(message, peer_id, peer_info)
             case PIEMsgType.PING:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_PING,
@@ -931,22 +939,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                rsp_body = PIEMsgBody(message.body_id())
-                rsp_body.sign(self.skey)
-                seq = message.seq + 255 - message.ttl
-                seq = seq if seq < 256 else 255
-                self.route_message(PIEMessage(
-                    PIEMsgType.ECHO,
-                    self.id,
-                    message.src,
-                    message.src_id,
-                    self.local_coords,
-                    self.tree.node_id,
-                    rsp_body.to_bytes(),
-                    bifurcations=self.route_table.get_bifurcations(self.id, message.src),
-                    flow_label=message.flow_label,
-                    seq=seq
-                ))
+                self._handle_ping(message)
             case PIEMsgType.ECHO:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_ECHO,
@@ -963,7 +956,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                self.respond_to_trace_route(message)
+                self._handle_trace_route(message, msgbody)
             case PIEMsgType.TRACE_ROUTE_ECHO:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_TRACE_ROUTE_ECHO,
@@ -972,27 +965,60 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                if msgbody.body:
-                    if 'use_big_coords' in self.config:
-                        bif = decode_big_coordinates(msgbody.body)
-                    else:
-                        bif = decode_coordinates(msgbody.body)
-                    self.route_table.add_bifurcation(
-                        self.id,
-                        message.dst,
-                        bif
-                    )
+                self._handle_tracert_echo(message, msgbody)
             case PIEMsgType.SET_ROOT:
-                ...
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_SET_ROOT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+                self.try_elect_root(message, msgbody)
             case PIEMsgType.OFFER_ASSIGNMENT:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_OFFER_ASSIGNMENT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
                 ...
             case PIEMsgType.REQUEST_ASSIGNMENT:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
                 ...
             case PIEMsgType.ACCEPT_ASSIGNMENT:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
                 ...
             case PIEMsgType.ANNOUNCE_ASSIGNMENT:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
                 ...
             case PIEMsgType.RELEASE_ASSIGNMENT:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
                 ...
             case PIEMsgType.ACKNOWLEDGE_MESSAGE:
                 self.invoke_hook(
@@ -1002,6 +1028,95 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
+
+    def _handle_hello(self, message: PIEMessage, peer_id: bytes,
+                      peer_info: dict) -> None:
+        """Handle incoming peer information."""
+        if peer_id not in self.tree.child_ids and \
+            peer_id not in self.tree.neighbor_ids:
+            # respond with HELLO
+            msgbody = PIEMsgBody(json.dumps({
+                'id': self.tree.node_id.hex(),
+                'coords': self.local_coords
+            }).encode('utf-8'))
+            msgbody.sign(self.skey)
+            try:
+                self.send_message(PIEMessage(
+                    PIEMsgType.HELLO,
+                    self.id,
+                    message.src,
+                    message.src_id,
+                    self.local_coords,
+                    self.tree.node_id,
+                    msgbody.to_bytes(),
+                    ttl=1
+                ), message.src_id)
+                # add neighbor if reachable
+                self.add_neighbor(peer_id, peer_info)
+            except UnicastException:
+                ...
+
+    def _handle_ping(self, message: PIEMessage) -> None:
+        """Responds to ping."""
+        rsp_body = PIEMsgBody(message.body_id())
+        rsp_body.sign(self.skey)
+        seq = message.seq + 255 - message.ttl
+        seq = seq if seq < 256 else 255
+        self.route_message(PIEMessage(
+            PIEMsgType.ECHO,
+            self.id,
+            message.src,
+            message.src_id,
+            self.local_coords,
+            self.tree.node_id,
+            rsp_body.to_bytes(),
+            bifurcations=self.route_table.get_bifurcations(self.id, message.src),
+            flow_label=message.flow_label,
+            seq=seq
+        ))
+
+    def _handle_trace_route(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Responds to a TRACE_ROUTE message."""
+        # first see if there is a path bifurcation
+        bifurcation = None
+        reverse_msg = PIEMessage(PIEMsgType.DEFAULT, self.id,
+                                    message.src, message.src_id,
+                                    message.dst, message.dst_id, b'',
+                                    flow_label=message.flow_label)
+        last_hop = self.calculate_next_hop(reverse_msg)
+        if message.last_hop:
+            if last_hop[1] != message.last_hop:
+                bifurcation = last_hop[1]
+
+        # then send a TRACE_ROUTE_ECHO to src
+        if bifurcation:
+            if 'use_big_coords' in self.config:
+                bifurcation = encode_big_coordinates(bifurcation)
+            else:
+                bifurcation = encode_coordinates(bifurcation)
+        body = PIEMsgBody(bifurcation)
+        body.sign(self.skey)
+        seq = message.seq + 255 - message.ttl
+        seq = seq if seq < 256 else 255
+        reverse_msg = PIEMessage(PIEMsgType.TRACE_ROUTE_ECHO, self.id,
+                                    message.src, message.src_id,
+                                    self.local_coords, self.tree.node_id,
+                                    body.to_bytes(), seq=seq,
+                                    flow_label=message.flow_label)
+        self.send_message(reverse_msg, last_hop[0], last_hop[1])
+
+    def _handle_tracert_echo(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Adds any bifurcation noticed."""
+        if msgbody.body:
+            if 'use_big_coords' in self.config:
+                bif = decode_big_coordinates(msgbody.body)
+            else:
+                bif = decode_coordinates(msgbody.body)
+            self.route_table.add_bifurcation(
+                self.id,
+                message.dst,
+                bif
+            )
 
     def send_message(self, message: PIEMessage, peer_id: bytes,
                      peer_coords: list[int] = []) -> None:

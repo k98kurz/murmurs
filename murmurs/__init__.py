@@ -5,7 +5,6 @@ from .pie import (
     PIETree,
     set_checksig_function,
     set_elect_root_func,
-    set_send_message_func,
     set_sign_function,
     encode_big_coordinates,
     encode_coordinates,
