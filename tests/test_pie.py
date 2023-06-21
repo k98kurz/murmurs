@@ -47,16 +47,19 @@ class TestPIEFunctions(unittest.TestCase):
         assert b1 != b2
         assert len(b3) == 2
 
-    def test_int_to_2_bytes(self):
-        b1 = pie.int_to_2_bytes(11)
-        b2 = pie.int_to_2_bytes(-11)
-        b3 = pie.int_to_2_bytes(1000)
+    def test_int_to_1_byte(self):
+        b1 = pie.int_to_1_byte(11)
+        b2 = pie.int_to_1_byte(-11)
+        b3 = pie.int_to_1_byte(100)
 
         assert type(b1) is type(b2) is type(b3) is bytes
-        assert len(b1) == len(b2) == len(b3) == 2
+        assert len(b1) == len(b2) == len(b3) == 1
         assert b1 != b2
         assert b1 != b3
         assert b2 != b3
+
+        with self.assertRaises(OverflowError):
+            pie.int_to_1_byte(1000)
 
     def test_bytes_to_int(self):
         i1 = pie.bytes_to_int(b'\xff\x00')
@@ -69,10 +72,10 @@ class TestPIEFunctions(unittest.TestCase):
         assert i2 != i3
 
     def test_bytes_int_conversions_e2e(self):
-        ints = list(range(300))
+        ints = list(range(-128, 128))
         bts = []
         for i in ints:
-            bts.append(pie.int_to_2_bytes(i))
+            bts.append(pie.int_to_1_byte(i))
 
         decoded = [pie.bytes_to_int(b) for b in bts]
         assert decoded == ints
@@ -81,7 +84,7 @@ class TestPIEFunctions(unittest.TestCase):
         coords = [5, -4, -3, 2, -2, 1]
         encoded = pie.encode_coordinates(coords)
         assert type(encoded) is bytes
-        assert len(encoded) == len(coords) * 2
+        assert len(encoded) == len(coords)
         decoded = pie.decode_coordinates(encoded)
         assert type(decoded) is list
         assert all(type(d) is int for d in decoded)

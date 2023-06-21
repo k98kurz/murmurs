@@ -334,12 +334,12 @@ def signed_int_to_bytes(number: int) -> bytes:
 
     return number.to_bytes(n_bytes, 'big')
 
-def int_to_2_bytes(number: int) -> bytes:
-    """Convert from arbitrarily large signed int to bytes."""
+def int_to_1_byte(number: int) -> bytes:
+    """Convert from signed int in [-128, 127] to bytes."""
     tert(type(number) is int, 'number must be int')
     negative = number < 0
     number = abs(number)
-    n_bytes = 2
+    n_bytes = 1
 
     if negative:
         number = (1 << (n_bytes * 8 - 1)) + (2**(n_bytes * 8 - 1) - number)
@@ -359,19 +359,18 @@ def bytes_to_int(number: bytes) -> int:
 
 def encode_coordinates(coordinates: list[int]) -> bytes:
     """Encodes coordinates into a reasonably compact bytes format."""
-    coords = [int_to_2_bytes(c) for c in coordinates]
+    coords = [int_to_1_byte(c) for c in coordinates]
     return b''.join(coords)
 
 def decode_coordinates(encoded: bytes) -> list[int]:
     """Decodes coordinates from a reasonably compact bytes format."""
     tert(type(encoded) is bytes, 'encoded must be bytes of len%2=0')
-    vert(len(encoded) % 2 == 0, 'encoded must be bytes of len%2=0')
     coords = []
     index = 0
 
     while index < len(encoded):
-        coords.append(encoded[index:index+2])
-        index += 2
+        coords.append(encoded[index:index+1])
+        index += 1
 
     return [bytes_to_int(c) for c in coords]
 
@@ -396,7 +395,9 @@ def decode_big_coordinates(encoded: bytes) -> list[int]:
 
 @dataclass
 class SrcAidedRouteTable:
-    """Route table for storing"""
+    """Route table for storing bifurcations detected during trace routes
+        initiated by the local node. Does not store bifurcations for
+    """
     bifurcations: dict[tuple[bytes, list[int]], tuple[int, list[list[int]]]] = field(default_factory=dict)
 
     def set_bifurcations(self, tree_id: bytes, dst: list[int], bifurcations: list[list[int]]) -> None:
@@ -809,7 +810,8 @@ class PIETree:
         reverse_msg = PIEMessage(PIEMsgType.TRACE_ROUTE_ECHO, self.id,
                                     message.src, message.src_id,
                                     self.local_coords, self.tree.node_id,
-                                    body.to_bytes())
+                                    body.to_bytes(), flow_label=message.flow_label,
+                                    seq=message.seq + 255 - message.ttl)
         self.send_message(reverse_msg, last_hop[0], last_hop[1])
 
     def calculate_next_hop(self, message: PIEMessage) -> tuple[list[int], bytes]:
