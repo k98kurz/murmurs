@@ -41,8 +41,11 @@ class PIEMsgType(Enum):
     TRACE_ROUTE = 4
     SET_ROOT = 5
     OFFER_ASSIGNMENT = 6
-    ACCEPT_ASSIGNMENT = 7
-    ANNOUNCE_ASSIGNMENT = 8
+    REQUEST_ASSIGNMENT = 7
+    ACCEPT_ASSIGNMENT = 8
+    ANNOUNCE_ASSIGNMENT = 9
+    RELEASE_ASSIGNMENT = 10
+    ACKNOWLEDGE_MESSAGE = 11
 
 
 @dataclass
@@ -50,9 +53,13 @@ class PIEMessage:
     msg_type: PIEMsgType
     treeid: bytes
     dst: list[int]
+    dst_id: bytes
     src: list[int]
-    bifurcations: list[list[int]]
+    src_id: bytes
     body: bytes
+    bifurcations: list[list[int]] = field(default_factory=list)
+    ttl: int = field(default=255)
+    flow_label: bytes = field(default_factory=lambda: token_bytes(4))
     last_hop: list[int] = field(default=None)
 
     def encode_header(self, use_big_coords: bool = False) -> bytes:
@@ -75,14 +82,21 @@ class PIEMessage:
         )
 
         return struct.pack(
-            f'!BB{len(self.treeid)}sB{len(dst)}sB{len(src)}s{len(bifurcations)}s',
+            f'!BBB4s{len(self.treeid)}sB{len(dst)}sB{len(self.dst_id)}sB' +
+            f'{len(src)}sB{len(self.src_id)}s{len(bifurcations)}s',
             self.msg_type.value,
             len(self.treeid),
+            self.ttl,
+            self.flow_label,
             self.treeid,
             len(dst),
             dst,
+            len(self.dst_id),
+            self.dst_id,
             len(src),
             src,
+            len(self.src_id),
+            self.src_id,
             bifurcations
         )
 
@@ -101,20 +115,28 @@ class PIEMessage:
     @staticmethod
     def decode_header(header: bytes, use_big_coords: bool = False) -> tuple:
         """Decode header fields from bytes."""
-        msg_type, treeid_len, header = struct.unpack(
-            f'!BB{len(header)-2}s',
+        msg_type, treeid_len, ttl, flow_label, header = struct.unpack(
+            f'!BBB4s{len(header)-7}s',
             header
         )
         treeid, dst_len, header = struct.unpack(
             f'!{treeid_len}sB{len(header)-1-treeid_len}s',
             header
         )
-        dst, src_len, header = struct.unpack(
+        dst, dst_id_len, header = struct.unpack(
             f'!{dst_len}sB{len(header)-1-dst_len}s',
             header
         )
-        src, bifurcations = struct.unpack(
-            f'!{src_len}s{len(header)-src_len}s',
+        dst_id, src_len, header = struct.unpack(
+            f'!{dst_id_len}sB{len(header)-1-dst_id_len}s',
+            header
+        )
+        src, src_id_len, header = struct.unpack(
+            f'!{src_len}sB{len(header)-1-src_len}s',
+            header
+        )
+        src_id, bifurcations = struct.unpack(
+            f'!{src_id_len}s{len(header)-src_id_len}s',
             header
         )
         n_bifs, bifurcations = struct.unpack(
@@ -148,8 +170,12 @@ class PIEMessage:
             PIEMsgType(msg_type),
             treeid,
             dst,
+            dst_id,
             src,
-            bifurcations
+            src_id,
+            bifurcations,
+            ttl,
+            flow_label
         )
 
     @classmethod
@@ -161,8 +187,18 @@ class PIEMessage:
             data
         )
         vert(len(body) == body_len, 'message body length mismatch')
-        msg_type, treeid, dst, src, bifurcations = cls.decode_header(header, use_big_coords)
-        return cls(msg_type, treeid, dst, src, bifurcations, body)
+        msg_type, treeid, dst, dst_id, src, src_id, bifurcations, ttl, flow_label = \
+            cls.decode_header(header, use_big_coords)
+        return cls(msg_type, treeid, dst, dst_id, src, src_id, body,
+                   bifurcations=bifurcations, ttl=ttl, flow_label=flow_label)
+
+    def body_id(self) -> bytes:
+        """Returns a unique ID for the message body."""
+        return sha256(self.body).digest()[:16]
+
+    def msg_id(self) -> bytes:
+        """Returns a unique ID for the message."""
+        return sha256(self.to_bytes()).digest()[:16]
 
 
 @dataclass
@@ -389,6 +425,79 @@ class PIETree:
         local_coords = self.calculate_coords(parent_coords, index, weight)
         self.tree.set_parent(parent_id, parent_data)
         self.local_coords = local_coords
+
+        # send ACCEPT_ASSIGNMENT message to new parent
+        if 'cert' in parent_data and _functions['sign']:
+            body = json.dumps({
+                'parent_id': parent_id.hex(),
+                'cert': parent_data['cert'],
+                'coords': local_coords,
+            }).encode('utf-8')
+            sig = _functions['sign'](self.skey, body)
+            body = struct.pack(
+                f'!BH{len(sig)}s{len(body)}s',
+                len(sig),
+                len(body),
+                sig,
+                body
+            )
+        else:
+            body = json.dumps({
+                'coords': local_coords
+            }).encode('utf-8')
+            body = struct.pack(
+                f'!BH{len(body)}s',
+                0,
+                len(body),
+                body
+            )
+
+        self.send_message(PIEMessage(
+            PIEMsgType.ACCEPT_ASSIGNMENT,
+            self.id,
+            parent_coords,
+            parent_id,
+            self.local_coords,
+            self.tree.node_id,
+            [],
+            body
+        ), parent_coords, parent_id)
+
+        # send OFFER_ASSIGNMENT to children
+        for cid in self.tree.child_ids:
+            if 'cert' in parent_data and _functions['sign']:
+                body = json.dumps({
+                    'parent_id': self.tree.node_id,
+                    'parent_coords': self.local_coords,
+                    'index': self.child_index(cid)
+                }).encode('utf-8')
+                sig = _functions['sign'](self.skey, body)
+                body = struct.pack(
+                    f'!BH{len(sig)}s{len(body)}s',
+                    len(sig),
+                    len(body),
+                    sig,
+                    body
+                )
+            else:
+                body = json.dumps({
+                    'parent_id': self.tree.node_id,
+                    'parent_coords': self.local_coords,
+                    'index': self.child_index(cid)
+                }).encode('utf-8')
+            self.send_message(PIEMessage(
+                PIEMsgType.OFFER_ASSIGNMENT,
+                self.id,
+                self.child_coords[cid],
+                cid,
+                self.local_coords,
+                self.tree.node_id,
+                [],
+                body
+            ), self.child_coords[cid], cid)
+
+        # send ANNOUNCE_ASSIGNMENT to neighbors
+
 
         self.invoke_hook(
             PIEEvent.AFTER_SET_PARENT,

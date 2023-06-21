@@ -105,7 +105,9 @@ class TestPIEMessage(unittest.TestCase):
     def test_encode_header_and_decode_header_e2e(self):
         treeid = b'some tree'
         dst = [5, -4, 3, -2, 2, 1]
+        dst_id = b'destination'
         src = [4, 3, -3, -2, 1, -1]
+        src_id = b'source'
         bifurcations = [
             [5, -4, -3, 2, -1],
             [-5, -4, -3, 2, -1],
@@ -115,10 +117,14 @@ class TestPIEMessage(unittest.TestCase):
             pie.PIEMsgType.PACKET,
             treeid,
             dst,
+            dst_id,
             src,
-            bifurcations,
-            body
+            src_id,
+            body,
+            bifurcations
         )
+        flow_label = msg.flow_label
+        ttl = msg.ttl
 
         encoded = msg.encode_header()
         assert type(encoded) is bytes
@@ -129,13 +135,19 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded[0] == pie.PIEMsgType.PACKET
         assert decoded[1] == treeid
         assert decoded[2] == dst
-        assert decoded[3] == src
-        assert decoded[4] == bifurcations
+        assert decoded[3] == dst_id
+        assert decoded[4] == src
+        assert decoded[5] == src_id
+        assert decoded[6] == bifurcations
+        assert decoded[7] == ttl
+        assert decoded[8] == flow_label
 
     def test_encode_header_and_decode_header_with_big_coords_e2e(self):
         treeid = b'some tree'
         dst = [5, -4, 3, -2, 2, 1]
+        dst_id = b'destination'
         src = [4, 3, -3, -2, 1, -1]
+        src_id = b'source'
         bifurcations = [
             [5, -4, -3, 2, -1],
             [-5, -4, -3, 2, -1],
@@ -145,10 +157,14 @@ class TestPIEMessage(unittest.TestCase):
             pie.PIEMsgType.PACKET,
             treeid,
             dst,
+            dst_id,
             src,
+            src_id,
+            body,
             bifurcations,
-            body
         )
+        ttl = msg.ttl
+        flow_label = msg.flow_label
 
         encoded = msg.encode_header(True)
         assert type(encoded) is bytes
@@ -159,13 +175,19 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded[0] == pie.PIEMsgType.PACKET
         assert decoded[1] == treeid
         assert decoded[2] == dst
-        assert decoded[3] == src
-        assert decoded[4] == bifurcations
+        assert decoded[3] == dst_id
+        assert decoded[4] == src
+        assert decoded[5] == src_id
+        assert decoded[6] == bifurcations
+        assert decoded[7] == ttl
+        assert decoded[8] == flow_label
 
     def test_to_bytes_and_from_bytes_e2e(self):
         treeid = b'some tree'
         dst = [5, -4, 3, -2, 2, 1]
         src = [4, 3, -3, -2, 1, -1]
+        dst_id = b'destination'
+        src_id = b'source'
         bifurcations = [
             [5, -4, -3, 2, -1],
             [-5, -4, -3, 2, -1],
@@ -175,9 +197,11 @@ class TestPIEMessage(unittest.TestCase):
             pie.PIEMsgType.PACKET,
             treeid,
             dst,
+            dst_id,
             src,
+            src_id,
+            body,
             bifurcations,
-            body
         )
 
         encoded = msg.to_bytes()
@@ -188,14 +212,17 @@ class TestPIEMessage(unittest.TestCase):
         assert isinstance(decoded, pie.PIEMessage)
         assert decoded.treeid == msg.treeid
         assert decoded.dst == msg.dst
-        assert decoded.src == msg.src
+        assert decoded.dst_id == msg.dst_id
+        assert decoded.src_id == msg.src_id
         assert decoded.bifurcations == msg.bifurcations
         assert decoded.body == msg.body
 
     def test_to_bytes_and_from_bytes_with_big_coords_e2e(self):
         treeid = b'some tree'
         dst = [5, -4, 3, -2, 2, 1]
+        dst_id = b'destination'
         src = [4, 3, -3, -2, 1, -1]
+        src_id = b'source'
         bifurcations = [
             [5, -4, -3, 2, -1],
             [-5, -4, -3, 2, -1],
@@ -205,9 +232,11 @@ class TestPIEMessage(unittest.TestCase):
             pie.PIEMsgType.PACKET,
             treeid,
             dst,
+            dst_id,
             src,
+            src_id,
+            body,
             bifurcations,
-            body
         )
 
         encoded = msg.to_bytes(True)
@@ -218,9 +247,71 @@ class TestPIEMessage(unittest.TestCase):
         assert isinstance(decoded, pie.PIEMessage)
         assert decoded.treeid == msg.treeid
         assert decoded.dst == msg.dst
+        assert decoded.dst_id == msg.dst_id
         assert decoded.src == msg.src
+        assert decoded.src_id == msg.src_id
         assert decoded.bifurcations == msg.bifurcations
         assert decoded.body == msg.body
+
+    def test_body_id_is_unique_and_deterministic_for_each_body(self):
+        treeid = b'some tree'
+        dst1 = [5, -4, 3, -2, 2, 1]
+        dst2 = [-5, 4, 3, 2, -1]
+        src = [4, 3, -3, -2, 1, -1]
+        dst1_id = b'dst1'
+        dst2_id = b'dst2'
+        src_id = b'src'
+        body1 = b'hello world'
+        body2 = b'yello world'
+        msg1 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+                              src, src_id, body1)
+        msg11 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+                               src, src_id, body1)
+        msg2 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+                               src, src_id, body2)
+        msg22 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+                               src, src_id, body2)
+
+        assert type(msg1.body_id()) is bytes
+        assert msg1.body_id() == msg1.body_id()
+        assert msg1.body_id() == msg11.body_id()
+        assert msg2.body_id() == msg2.body_id()
+        assert msg2.body_id() == msg22.body_id()
+
+    def test_msg_id_is_unique_and_deterministic_for_each_msg(self):
+        treeid = b'some tree'
+        dst1 = [5, -4, 3, -2, 2, 1]
+        dst2 = [-5, 4, 3, 2, -1]
+        src = [4, 3, -3, -2, 1, -1]
+        dst1_id = b'dst1'
+        dst2_id = b'dst2'
+        src_id = b'src'
+        body1 = b'hello world'
+        body2 = b'yello world'
+        msg1 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+                              src, src_id, body1)
+        msg11 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+                              src, src_id, body1)
+        msg2 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+                              src, src_id, body2)
+        msg22 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+                              src, src_id, body2)
+
+        assert type(msg1.msg_id()) is bytes
+        assert msg1.msg_id() == msg1.msg_id()
+        assert msg1.msg_id() != msg11.msg_id()
+        assert msg2.msg_id() == msg2.msg_id()
+        assert msg2.msg_id() != msg22.msg_id()
+        assert msg11.msg_id() != msg22.msg_id()
+
+
+class Sender:
+    sent: list[pie.PIEMessage]
+    def __init__(self) -> None:
+        self.sent = []
+    def unicast(self, message: pie.PIEMessage, dst: list[int], route_data: dict = None) -> bool:
+        self.sent.append(message)
+        return True
 
 
 class TestPIETree(unittest.TestCase):
@@ -283,8 +374,9 @@ class TestPIETree(unittest.TestCase):
             pie.PIEMsgType.ECHO,
             tree.id,
             dst,
+            b'dst_id',
             [-3, 2, 1],
-            [],
+            b'src_id',
             b'olleh'
         )
 
@@ -293,15 +385,7 @@ class TestPIETree(unittest.TestCase):
         assert str(e.exception) == f'could not unicast to peer_id={peer_id.hex()}'
 
     def test_add_sender_causes_sender_unicast_to_be_invoked_on_send(self):
-        class Sender:
-            sent: list[pie.PIEMessage]
-            def __init__(self) -> None:
-                self.sent = []
-            def unicast(self, message: pie.PIEMessage, dst: list[int], route_data: dict = None) -> bool:
-                self.sent.append(message)
-                return True
         sender = Sender()
-
         tree = pie.PIETree()
         peer_id = b'some node'
         dst = [-2, 1]
@@ -309,8 +393,9 @@ class TestPIETree(unittest.TestCase):
             pie.PIEMsgType.ECHO,
             tree.id,
             dst,
+            b'dst_id',
             [-3, 2, 1],
-            [],
+            b'src_id',
             b'olleh'
         )
         tree.add_sender(sender)
@@ -335,6 +420,7 @@ class TestPIETree(unittest.TestCase):
             return data
 
         tree = pie.PIETree()
+        tree.add_sender(Sender())
         tree.add_hook(pie.PIEEvent.BEFORE_SET_PARENT, hook1)
         tree.add_hook(pie.PIEEvent.AFTER_SET_PARENT, hook3)
         tree.tree.add_hook(spanningtree.SpanningTreeEvent.BEFORE_SET_PARENT, hook2)
@@ -351,6 +437,20 @@ class TestPIETree(unittest.TestCase):
         assert 'hook3' in signal
         assert 'hook4' in signal
         assert tree.tree.parent_id == b'parent'
+
+    def test_set_parent_sends_messages(self):
+        tree = pie.PIETree()
+        parent_id = b'parent'
+        parent_coords = [-2, 1]
+        child_ids = [
+            b'child1',
+            b'child2',
+        ]
+        neighbor_ids = [
+            b'neighbor1',
+            b'neighbor2',
+            b'neighbor3',
+        ]
 
 
 if __name__ == '__main__':
