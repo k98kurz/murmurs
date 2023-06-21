@@ -451,7 +451,7 @@ class TestPIETree(unittest.TestCase):
         )
 
         with self.assertRaises(errors.UnicastException) as e:
-            tree.send_message(message, [-2, 1], peer_id)
+            tree.send_message(message, peer_id)
         assert str(e.exception) == f'could not unicast to peer_id={peer_id.hex()}'
 
     def test_add_sender_causes_sender_unicast_to_be_invoked_on_send(self):

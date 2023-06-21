@@ -556,7 +556,7 @@ class PIETree:
             self.local_coords,
             self.tree.node_id,
             body.to_bytes(),
-        ), parent_coords, parent_id)
+        ), parent_id, parent_coords)
 
         # send ANNOUNCE_ASSIGNMENT to neighbors
         for nid in self.tree.neighbor_ids:
@@ -570,7 +570,7 @@ class PIETree:
                 self.local_coords,
                 self.tree.node_id,
                 body.to_bytes(),
-            ), self.neighbor_coords[nid], nid)
+            ), nid, self.neighbor_coords[nid] if nid in self.neighbor_coords else [])
 
         # send OFFER_ASSIGNMENT to children
         for cid in self.tree.child_ids:
@@ -597,7 +597,7 @@ class PIETree:
                 self.tree.node_id,
                 [],
                 body.to_bytes()
-            ), self.child_coords[cid], cid)
+            ), cid)
 
         self.invoke_hook(
             PIEEvent.AFTER_SET_PARENT,
@@ -814,7 +814,7 @@ class PIETree:
                                     seq=message.seq + 255 - message.ttl)
         self.send_message(reverse_msg, last_hop[0], last_hop[1])
 
-    def calculate_next_hop(self, message: PIEMessage) -> tuple[list[int], bytes]:
+    def calculate_next_hop(self, message: PIEMessage) -> tuple[bytes, list[int]]:
         """Chooses the next hop based on the distance metric and
             bifurcations added to the header.
         """
@@ -826,19 +826,19 @@ class PIETree:
         for cid, coords in self.child_coords.items():
             if coords == message.last_hop:
                 continue
-            peers.append((self.calculate_distance(coords, message.dst), coords, cid))
+            peers.append((self.calculate_distance(coords, message.dst), cid, coords))
         for nid, coords in self.neighbor_coords.items():
             if coords == message.last_hop:
                 continue
-            peers.append((self.calculate_distance(coords, message.dst), coords, nid))
+            peers.append((self.calculate_distance(coords, message.dst), nid, coords))
 
         peers.sort()
 
         bifurcation = None
-        peer_coords = [p[1] for p in peers]
+        peer_coords = [p[2] for p in peers]
         for coords in message.bifurcations:
             if coords in peer_coords and coords != message.last_hop:
-                bifurcation = peers[peer_coords.index(coords)]
+                bifurcation = peers[peer_coords.index(coords)][1:]
                 break
 
         next_hop = bifurcation if bifurcation else peers[0][1:]
@@ -916,7 +916,7 @@ class PIETree:
                         self.tree.node_id,
                         msgbody.to_bytes(),
                         ttl=1
-                    ), message.src, message.src_id)
+                    ), message.src_id, message.src)
             case PIEMsgType.PING:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_PING,
@@ -993,8 +993,8 @@ class PIETree:
                     }
                 )
 
-    def send_message(self, message: PIEMessage, peer_coords: list[int],
-                     peer_id: bytes) -> None:
+    def send_message(self, message: PIEMessage, peer_id: bytes,
+                     peer_coords: list[int] = []) -> None:
         """Send a message to a specific peer."""
         self.invoke_hook(
             PIEEvent.SEND_MESSAGE,
