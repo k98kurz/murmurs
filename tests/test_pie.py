@@ -114,7 +114,7 @@ class TestPIEMessage(unittest.TestCase):
         ]
         body = b'hello world'
         msg = pie.PIEMessage(
-            pie.PIEMsgType.PACKET,
+            pie.PIEMsgType.DEFAULT,
             treeid,
             dst,
             dst_id,
@@ -132,7 +132,7 @@ class TestPIEMessage(unittest.TestCase):
 
         decoded = pie.PIEMessage.decode_header(encoded)
         assert type(decoded) is tuple
-        assert decoded[0] == pie.PIEMsgType.PACKET
+        assert decoded[0] == pie.PIEMsgType.DEFAULT
         assert decoded[1] == treeid
         assert decoded[2] == dst
         assert decoded[3] == dst_id
@@ -154,7 +154,7 @@ class TestPIEMessage(unittest.TestCase):
         ]
         body = b'hello world'
         msg = pie.PIEMessage(
-            pie.PIEMsgType.PACKET,
+            pie.PIEMsgType.DEFAULT,
             treeid,
             dst,
             dst_id,
@@ -172,7 +172,7 @@ class TestPIEMessage(unittest.TestCase):
 
         decoded = pie.PIEMessage.decode_header(encoded, True)
         assert type(decoded) is tuple
-        assert decoded[0] == pie.PIEMsgType.PACKET
+        assert decoded[0] == pie.PIEMsgType.DEFAULT
         assert decoded[1] == treeid
         assert decoded[2] == dst
         assert decoded[3] == dst_id
@@ -194,7 +194,7 @@ class TestPIEMessage(unittest.TestCase):
         ]
         body = b'hello world'
         msg = pie.PIEMessage(
-            pie.PIEMsgType.PACKET,
+            pie.PIEMsgType.DEFAULT,
             treeid,
             dst,
             dst_id,
@@ -229,7 +229,7 @@ class TestPIEMessage(unittest.TestCase):
         ]
         body = b'hello world'
         msg = pie.PIEMessage(
-            pie.PIEMsgType.PACKET,
+            pie.PIEMsgType.DEFAULT,
             treeid,
             dst,
             dst_id,
@@ -263,13 +263,13 @@ class TestPIEMessage(unittest.TestCase):
         src_id = b'src'
         body1 = b'hello world'
         body2 = b'yello world'
-        msg1 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+        msg1 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
                               src, src_id, body1)
-        msg11 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+        msg11 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
                                src, src_id, body1)
-        msg2 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+        msg2 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
                                src, src_id, body2)
-        msg22 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+        msg22 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
                                src, src_id, body2)
 
         assert type(msg1.body_id()) is bytes
@@ -288,13 +288,13 @@ class TestPIEMessage(unittest.TestCase):
         src_id = b'src'
         body1 = b'hello world'
         body2 = b'yello world'
-        msg1 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+        msg1 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
                               src, src_id, body1)
-        msg11 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+        msg11 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
                               src, src_id, body1)
-        msg2 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst1, dst1_id,
+        msg2 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
                               src, src_id, body2)
-        msg22 = pie.PIEMessage(pie.PIEMsgType.PACKET, treeid, dst2, dst2_id,
+        msg22 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
                               src, src_id, body2)
 
         assert type(msg1.msg_id()) is bytes
@@ -346,10 +346,10 @@ class TestPIETree(unittest.TestCase):
     def test_set_hook_replaces_hook(self):
         tree = pie.PIETree()
         signal = {}
-        def hook1(event_name: str, data: dict):
-            signal['event'] = event_name
+        def hook1(event: pie.PIEEvent, data: dict):
+            signal['event'] = event
             signal['data'] = data
-        def hook2(event_name: str, data: dict):
+        def hook2(event: pie.PIEEvent, data: dict):
             signal['event'] = 'replaced'
             signal['data'] = 'replaced'
         tree.set_hook(pie.PIEEvent.RECEIVE_MESSAGE, hook1)
@@ -371,10 +371,10 @@ class TestPIETree(unittest.TestCase):
     def test_add_hook_executes_multiple_handlers_in_order(self):
         tree = pie.PIETree()
         signal = {}
-        def hook1(event_name: str, data: dict):
+        def hook1(event: pie.PIEEvent, data: dict):
             signal['event'] = 'hook1'
             return data
-        def hook2(event_name: str, data: dict):
+        def hook2(event: pie.PIEEvent, data: dict):
             signal['data'] = data
             return data
         tree.add_hook(pie.PIEEvent.DELIVER_PACKET, hook1)

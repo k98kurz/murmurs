@@ -8,6 +8,7 @@ from enum import Enum, auto
 from hashlib import sha256
 from math import ceil, floor, log2
 from secrets import token_bytes
+from time import time
 from typing import Callable
 from uuid import uuid4
 import json
@@ -18,6 +19,11 @@ class PIEEvent(Enum):
     """Events for hooks on the PIETree."""
     RECEIVE_MESSAGE = auto()
     DELIVER_PACKET = auto()
+    CRYPTO_ERROR = auto()
+    RECEIVE_PEER_INFO = auto()
+    RECEIVE_ACK = auto()
+    RECEIVE_PING = auto()
+    RECEIVE_ECHO = auto()
     SEND_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
     BEFORE_SET_PARENT = auto()
@@ -34,18 +40,19 @@ class PIEEvent(Enum):
 
 class PIEMsgType(Enum):
     """Valid message types."""
-    PACKET = 0
+    DEFAULT = 0
     HELLO = 1
     PING = 2
     ECHO = 3
     TRACE_ROUTE = 4
-    SET_ROOT = 5
-    OFFER_ASSIGNMENT = 6
-    REQUEST_ASSIGNMENT = 7
-    ACCEPT_ASSIGNMENT = 8
-    ANNOUNCE_ASSIGNMENT = 9
-    RELEASE_ASSIGNMENT = 10
-    ACKNOWLEDGE_MESSAGE = 11
+    TRACE_ROUTE_ECHO = 5
+    SET_ROOT = 6
+    OFFER_ASSIGNMENT = 7
+    REQUEST_ASSIGNMENT = 8
+    ACCEPT_ASSIGNMENT = 9
+    ANNOUNCE_ASSIGNMENT = 10
+    RELEASE_ASSIGNMENT = 11
+    ACKNOWLEDGE_MESSAGE = 12
 
 
 @dataclass
@@ -351,6 +358,36 @@ def decode_big_coordinates(encoded: bytes) -> list[int]:
     return [bytes_to_int(c) for c in coords]
 
 
+@dataclass
+class SrcAidedRouteTable:
+    """Route table for storing"""
+    bifurcations: dict[tuple[bytes, list[int]], tuple[int, list[list[int]]]] = field(default_factory=dict)
+
+    def set_bifurcations(self, tree_id: bytes, dst: list[int], bifurcations: list[list[str]]) -> None:
+        """Set bifurcations for a destination on a tree."""
+        tert(type(tree_id) is bytes, 'tree_id must be bytes')
+        tert(type(dst) is list, 'dst must be list of ints')
+        tert(all(type(coord) is int for coord in dst), 'dst must be list of ints')
+        tert(type(bifurcations) is list, 'bifurcations must be list[list[int]]')
+        self.bifurcations[(tree_id.hex(), dst)] = bifurcations
+
+    def get_bifurcations(self, tree_id: bytes, dst: list[int]) -> list[list[int]]:
+        """Get the bifurcations for a destination on a tree."""
+        tert(type(tree_id) is bytes, 'tree_id must be bytes')
+        tert(type(dst) is list, 'dst must be list of ints')
+        tert(all(type(coord) is int for coord in dst), 'dst must be list of ints')
+        return self.bifurcations[(tree_id.hex(), dst)] if (tree_id.hex(), dst) in self.bifurcations else []
+
+    def to_json(self) -> str:
+        """Return instance data serialized to json."""
+        return json.dumps(self.bifurcations)
+
+    @classmethod
+    def from_json(cls, data: str) -> SrcAidedRouteTable:
+        """Deserialize data from json and return instance."""
+        return cls(json.loads(data))
+
+
 class PIETree:
     id: bytes
     config: dict|CanJsonSerialize
@@ -362,6 +399,7 @@ class PIETree:
     neighbor_coords: dict[bytes, list[int]]
     senders: list[CanUnicast]
     hooks: dict[str, Callable]
+    route_table: SrcAidedRouteTable
 
     def __init__(self, id: bytes = None,
                  config: dict|CanJsonSerialize = {},
@@ -371,7 +409,8 @@ class PIETree:
                  node_id: bytes = None,
                  local_coords: list[int] = None,
                  child_coords: dict[bytes, list[int]] = None,
-                 neighbor_coords: dict[bytes, list[int]] = None) -> None:
+                 neighbor_coords: dict[bytes, list[int]] = None,
+                 route_table: SrcAidedRouteTable = None) -> None:
         self.id = id if id else uuid4().bytes
         if config:
             if isinstance(config, CanJsonSerialize):
@@ -388,6 +427,7 @@ class PIETree:
         self.neighbor_coords = neighbor_coords or {}
         self.senders = []
         self.hooks = {}
+        self.route_table = route_table or SrcAidedRouteTable()
 
     def set_hook(self, event: PIEEvent,
                  func: Callable[[PIEEvent, dict], dict]) -> None:
@@ -419,7 +459,7 @@ class PIETree:
         """Invokes the hooks if present for the event, passing data."""
         tert(type(event) is PIEEvent, 'event must be PIEEvent')
         if event.name in self.hooks:
-            self.hooks[event.name](event.name, {**data, 'tree': self})
+            self.hooks[event.name](event, {**data, 'tree': self})
 
     def add_sender(self, sender: CanUnicast) -> None:
         """Add a unicast sender."""
@@ -680,6 +720,60 @@ class PIETree:
         if message.dst == self.local_coords:
             return self.receive_message(message)
 
+        self.route_message(message)
+
+    def route_message(self, message: PIEMessage) -> None:
+        """Finds the next hop and sends to that peer."""
+        next_hop = self.calculate_next_hop(message)
+
+        # invoke hook
+        self.invoke_hook(
+            PIEEvent.ROUTE_MESSAGE,
+            {
+                'message': message,
+                'next_hop': next_hop
+            }
+        )
+
+        if message.msg_type == PIEMsgType.TRACE_ROUTE:
+            self.respond_to_trace_route(message)
+
+        message.ttl -= 1
+        self.send_message(message, next_hop[0], next_hop[1])
+
+    def respond_to_trace_route(self, message: PIEMessage) -> None:
+        """Responds to a TRACE_ROUTE message."""
+        # first see if there is a path bifurcation
+        bifurcation = None
+        reverse_msg = PIEMessage(PIEMsgType.DEFAULT, self.id,
+                                    message.src, message.src_id,
+                                    message.dst, message.dst_id, b'')
+        last_hop = self.calculate_next_hop(reverse_msg)
+        if message.last_hop:
+            if last_hop[1] != message.last_hop:
+                bifurcation = last_hop[1]
+
+        # then send a TRACE_ROUTE_ECHO to src
+        if bifurcation:
+            if 'use_big_coords' in self.config:
+                bifurcation = encode_big_coordinates(bifurcation)
+            else:
+                bifurcation = encode_coordinates(bifurcation)
+        body = PIEMsgBody(bifurcation)
+        body.sign(self.skey)
+        reverse_msg = PIEMessage(PIEMsgType.TRACE_ROUTE_ECHO, self.id,
+                                    message.src, message.src_id,
+                                    self.local_coords, self.tree.node_id,
+                                    body.to_bytes())
+        self.send_message(reverse_msg, last_hop[0], last_hop[1])
+
+    def calculate_next_hop(self, message: PIEMessage) -> tuple[list[int], bytes]:
+        """Chooses the next hop based on the distance metric and
+            bifurcations added to the header.
+        """
+        if message.dst_id in self.tree.child_ids or message.dst_id in self.tree.neighbor_ids:
+            return (message.dst, message.dst_id)
+
         # forward to nearest peer
         peers = []
         for cid, coords in self.child_coords.items():
@@ -701,25 +795,45 @@ class PIETree:
                 break
 
         next_hop = bifurcation if bifurcation else peers[0][1:]
-
-        # invoke hook
-        self.invoke_hook(
-            PIEEvent.ROUTE_MESSAGE,
-            {
-                'message': message,
-                'next_hop': next_hop
-            }
-        )
-
-        self.send_message(message, next_hop[0], next_hop[1])
+        return next_hop
 
     def receive_message(self, message: PIEMessage) -> None:
         """Receive a message."""
         self.invoke_hook(PIEEvent.RECEIVE_MESSAGE, {'message': message})
 
+        msgbody = PIEMsgBody.from_bytes(message.body)
+        if msgbody.sig and _functions['check_sig']:
+            if not _functions['check_sig'](message.src_id, msgbody.body, msgbody.sig):
+                return self.invoke_hook(
+                    PIEEvent.CRYPTO_ERROR,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+
+        peer_info = json.loads(str(msgbody.body, 'utf-8'))
+        peer_id = bytes.fromhex(peer_info['id'])
+        peer_info['id'] = peer_id
+
+        # send ACK except when receiving ACK
+        if message.msg_type is not PIEMsgType.ACKNOWLEDGE_MESSAGE:
+            rsp_body = PIEMsgBody(message.body_id())
+            rsp_body.sign(self.skey)
+            self.route_message(PIEMessage(
+                PIEMsgType.ACKNOWLEDGE_MESSAGE,
+                self.id,
+                message.src,
+                peer_id,
+                self.local_coords,
+                self.tree.node_id,
+                rsp_body.to_bytes(),
+                bifurcations=self.route_table.get_bifurcations(self.id, message.src)
+            ))
+
         # handle protocol events
         match message.msg_type:
-            case PIEMsgType.PACKET:
+            case PIEMsgType.DEFAULT:
                 # this was the destination
                 self.invoke_hook(
                     PIEEvent.DELIVER_PACKET,
@@ -729,15 +843,65 @@ class PIETree:
                 )
             case PIEMsgType.HELLO:
                 # peer information
-                ...
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_PEER_INFO,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
 
-    def send_message(self, message: PIEMessage, coords: list[int], peer_id: bytes) -> None:
+                if peer_id not in self.tree.child_ids and \
+                    peer_id not in self.tree.neighbor_ids:
+                    self.add_neighbor(peer_id, peer_info)
+                    # respond with HELLO
+                    msgbody = PIEMsgBody(json.dumps({
+                        'id': self.tree.node_id.hex(),
+                        'coords': self.local_coords
+                    }).encode('utf-8'))
+                    msgbody.sign(self.skey)
+                    self.send_message(PIEMessage(
+                        PIEMsgType.HELLO,
+                        self.id,
+                        message.src,
+                        message.src_id,
+                        self.local_coords,
+                        self.tree.node_id,
+                        msgbody.to_bytes(),
+                        ttl=1
+                    ), message.src, message.src_id)
+            case PIEMsgType.PING:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_PING,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+                rsp_body = PIEMsgBody(message.body_id())
+                rsp_body.sign(self.skey)
+                self.route_message(PIEMessage(
+                    PIEMsgType.ECHO,
+                    self.id,
+                    message.src,
+                    message.src_id,
+                    self.local_coords,
+                    self.tree.node_id,
+                    rsp_body.to_bytes(),
+                    bifurcations=self.route_table.get_bifurcations(self.id, message.src)
+                ))
+            case PIEMsgType.ECHO:
+                msgbody
+
+
+    def send_message(self, message: PIEMessage, peer_coords: list[int],
+                     peer_id: bytes) -> None:
         """Send a message to a specific peer."""
         self.invoke_hook(
             PIEEvent.SEND_MESSAGE,
             {
                 'message': message,
-                'coords': coords,
+                'peer_coords': peer_coords,
                 'peer_id': peer_id
             }
         )
