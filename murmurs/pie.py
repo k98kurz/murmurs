@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .errors import tert, vert, UnicastException
+from .errors import tert, vert, tressa, UnicastException
 from .interfaces import CanJsonSerialize, CanUnicast
 from .spanningtree import LocalTree
 from base64 import b64decode, b64encode
@@ -520,7 +520,7 @@ class PIETree:
             ValueError if must_use_cert set in config but cert missing
             from parent_data.
         """
-        if 'cert' not in other_parent_data and 'must_use_cert' in self.config:
+        if 'cert' not in other_parent_data and 'use_certs' in self.config:
             raise ValueError('missing required cert')
         parent_data = {**other_parent_data, 'parent_coords': parent_coords}
         self.invoke_hook(
@@ -537,7 +537,6 @@ class PIETree:
         self.tree.set_parent(parent_id, parent_data)
         self.local_coords = local_coords
 
-        # send ACCEPT_ASSIGNMENT message to new parent
         if 'cert' in parent_data:
             body = PIEMsgBody(json.dumps({
                 'parent_id': parent_id.hex(),
@@ -550,9 +549,28 @@ class PIETree:
                 'parent_id': parent_id.hex(),
                 'coords': local_coords
             }).encode('utf-8'))
-
         body.sign(self.skey)
 
+        # send ACCEPT_ASSIGNMENT message to new parent
+        self._accept_assignment(parent_id, parent_coords, body)
+
+        # send ANNOUNCE_ASSIGNMENT to neighbors
+        self._announce_assignment(body)
+
+        # send OFFER_ASSIGNMENT to children
+        self._offer_assignments(parent_data)
+
+        self.invoke_hook(
+            PIEEvent.AFTER_SET_PARENT,
+            {
+                'parent_id': parent_id,
+                'parent_data': self.tree.parent_data
+            }
+        )
+
+    def _accept_assignment(self, parent_id: bytes, parent_coords: list[int],
+                           body: PIEMsgBody) -> None:
+        """Send ACCEPT_ASSIGNMENT to new parent."""
         self.send_message(PIEMessage(
             PIEMsgType.ACCEPT_ASSIGNMENT,
             self.id,
@@ -563,7 +581,8 @@ class PIETree:
             body.to_bytes(),
         ), parent_id, parent_coords)
 
-        # send ANNOUNCE_ASSIGNMENT to neighbors
+    def _announce_assignment(self, body: PIEMsgBody) -> None:
+        """Send ANNOUNCE_ASSIGNMENT to neighbors"""
         for nid in self.tree.neighbor_ids:
             if nid not in self.neighbor_coords:
                 continue
@@ -577,8 +596,10 @@ class PIETree:
                 body.to_bytes(),
             ), nid, self.neighbor_coords[nid] if nid in self.neighbor_coords else [])
 
-        # send OFFER_ASSIGNMENT to children
-        for cid in self.tree.child_ids:
+    def _offer_assignments(self, parent_data: dict) -> None:
+        """Send OFFER_ASSIGNMENT to children and turn them into neighbors."""
+        child_ids = [*self.tree.child_ids]
+        for cid in child_ids:
             if 'cert' in parent_data:
                 child_cert = self.make_cert({
                     'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
@@ -590,32 +611,31 @@ class PIETree:
                 body = PIEMsgBody(json.dumps({
                     'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
                     'coords': self.local_coords,
-                    'index': self.child_index(cid)
+                    'index': self.child_index(cid),
+                    'root': self.root
                 }).encode('utf-8'))
             body.sign(self.skey)
-            self.send_message(PIEMessage(
-                PIEMsgType.OFFER_ASSIGNMENT,
-                self.id,
-                self.child_coords[cid],
-                cid,
-                self.local_coords,
-                self.tree.node_id,
-                [],
-                body.to_bytes()
-            ), cid)
-
-        self.invoke_hook(
-            PIEEvent.AFTER_SET_PARENT,
-            {
-                'parent_id': parent_id,
-                'parent_data': self.tree.parent_data
-            }
-        )
+            try:
+                self.send_message(PIEMessage(
+                    PIEMsgType.OFFER_ASSIGNMENT,
+                    self.id,
+                    self.child_coords[cid],
+                    cid,
+                    self.local_coords,
+                    self.tree.node_id,
+                    [],
+                    body.to_bytes()
+                ), cid)
+                self.add_neighbor(cid, self.tree.child_data[cid])
+            except UnicastException:
+                ...
+            finally:
+                self.remove_child(cid)
 
     def make_cert(self, cert_data: dict, base_cert: bytes = b'') -> bytes:
         """Makes a signed certificate."""
         tert(callable(_functions['sign']), 'missing callable sign function')
-        cert = {**cert_data, 'signer_id': b64encode(self.tree.node_id).decode('utf-8')}
+        cert = {**cert_data, 'parent_id': b64encode(self.tree.node_id).decode('utf-8')}
         if base_cert:
             cert['base'] = b64encode(base_cert).decode('utf-8')
         cert = b64encode(json.dumps(cert).encode('utf-8'))
@@ -637,16 +657,16 @@ class PIETree:
             body = cert['data'].encode('utf-8')
             sig = b64decode(cert['sig'])
             data = json.loads(b64decode(cert['body']).decode('utf-8'))
-            signer_id = b64decode(data['signer_id'])
+            parent_id = b64decode(data['parent_id'])
             # first check the signature
-            if not _functions['check_sig'](signer_id, body, sig):
+            if not _functions['check_sig'](parent_id, body, sig):
                 return False
             # if there is a base cert, check it
             if 'base' in data:
                 return self.check_cert(b64decode(data['base']))
             # otherwise make sure it was signed by the root
-            if signer_id != self.root:
-                return self.try_elect_root(signer_id)
+            if parent_id != self.root:
+                return self.try_elect_root(parent_id)
         except BaseException:
             return False
         return True
@@ -956,7 +976,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                self._handle_trace_route(message, msgbody)
+                self._handle_trace_route(message)
             case PIEMsgType.TRACE_ROUTE_ECHO:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_TRACE_ROUTE_ECHO,
@@ -983,7 +1003,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                ...
+                self._handle_offer_assignment(message, msgbody)
             case PIEMsgType.REQUEST_ASSIGNMENT:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
@@ -1075,7 +1095,7 @@ class PIETree:
             seq=seq
         ))
 
-    def _handle_trace_route(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+    def _handle_trace_route(self, message: PIEMessage) -> None:
         """Responds to a TRACE_ROUTE message."""
         # first see if there is a path bifurcation
         bifurcation = None
@@ -1117,6 +1137,21 @@ class PIETree:
                 message.dst,
                 bif
             )
+
+    def _handle_offer_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Handle an assignment offer. Raises UsageError if check_sig
+            function is missingk, TypeError if an argument is of the
+            wrong type, and ValueError if an arg is malformed.
+        """
+        tert(isinstance(message, PIEMessage), 'message must be PIEMessage')
+        tert(isinstance(msgbody, PIEMsgBody), 'message must be PIEMsgBody')
+        data = json.loads(msgbody.body.decode('utf-8'))
+        if 'use_certs' in self.config:
+            tressa(callable(_functions['check_sig']), 'missing callable check_sig function')
+            vert('cert' in data, 'missing cert data')
+            vert('sig' in data, 'missing sig data')
+        else:
+            ...
 
     def send_message(self, message: PIEMessage, peer_id: bytes,
                      peer_coords: list[int] = []) -> None:

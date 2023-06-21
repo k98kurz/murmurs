@@ -1,3 +1,7 @@
+class UsageError(BaseException):
+    ...
+
+
 def vert(condition: bool, message: str = '') -> None:
     """Replacement for assert preconditions. Raises ValueError with the
         given message if the condition check fails.
@@ -13,6 +17,14 @@ def tert(condition: bool, message: str = '') -> None:
     if condition:
         return
     raise TypeError(message)
+
+def tressa(condition: bool, message: str = '') -> None:
+    """Replacement for assert preconditions. Raises UsageError with the
+        given message if the condition check fails.
+    """
+    if condition:
+        return
+    raise UsageError(message)
 
 
 class UnicastException(BaseException):

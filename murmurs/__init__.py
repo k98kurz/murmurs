@@ -1,3 +1,7 @@
+from .errors import (
+    UnicastException,
+    UsageError
+)
 from .pie import (
     PIEEvent,
     PIEMsgType,
