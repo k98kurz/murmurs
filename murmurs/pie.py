@@ -202,9 +202,31 @@ class PIEMessage:
 
 
 @dataclass
-class HelloBody:
-    peerid: bytes
-    coords: list[int]
+class PIEMsgBody:
+    body: bytes
+    sig: bytes = field(default=b'')
+
+    def sign(self, skey: bytes) -> None:
+        """Sign the message with the skey and _functions['sign'] func."""
+        if _functions['sign']:
+            self.sig = _functions['sign'](skey, self.body)
+
+    def to_bytes(self) -> bytes:
+        """Serialize to bytes."""
+        return struct.pack(
+            f'!BB{len(self.sig)}s{len(self.body)}s',
+            len(self.sig),
+            len(self.body),
+            self.sig,
+            self.body,
+        )
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> PIEMsgBody:
+        "Deserialize from bytes."
+        sig_len, body_len, data = struct.unpack(f'!BB{len(data)-2}s', data)
+        sig, body = struct.unpack(f'{sig_len}s{body_len}s', data)
+        return PIEMsgBody(body, sig)
 
 
 _functions = {
@@ -427,30 +449,19 @@ class PIETree:
         self.local_coords = local_coords
 
         # send ACCEPT_ASSIGNMENT message to new parent
-        if 'cert' in parent_data and _functions['sign']:
-            body = json.dumps({
+        if 'cert' in parent_data:
+            body = PIEMsgBody(json.dumps({
                 'parent_id': parent_id.hex(),
                 'cert': parent_data['cert'],
                 'coords': local_coords,
-            }).encode('utf-8')
-            sig = _functions['sign'](self.skey, body)
-            body = struct.pack(
-                f'!BH{len(sig)}s{len(body)}s',
-                len(sig),
-                len(body),
-                sig,
-                body
-            )
+            }).encode('utf-8'))
         else:
-            body = json.dumps({
+            body = PIEMsgBody(json.dumps({
+                'parent_id': parent_id.hex(),
                 'coords': local_coords
-            }).encode('utf-8')
-            body = struct.pack(
-                f'!BH{len(body)}s',
-                0,
-                len(body),
-                body
-            )
+            }).encode('utf-8'))
+
+        body.sign(self.skey)
 
         self.send_message(PIEMessage(
             PIEMsgType.ACCEPT_ASSIGNMENT,
@@ -459,32 +470,39 @@ class PIETree:
             parent_id,
             self.local_coords,
             self.tree.node_id,
-            [],
-            body
+            body.to_bytes(),
         ), parent_coords, parent_id)
+
+        # send ANNOUNCE_ASSIGNMENT to neighbors
+        for nid in self.tree.neighbor_ids:
+            if nid not in self.neighbor_coords:
+                continue
+            self.send_message(PIEMessage(
+                PIEMsgType.ANNOUNCE_ASSIGNMENT,
+                self.id,
+                self.neighbor_coords[nid],
+                nid,
+                self.local_coords,
+                self.tree.node_id,
+                body.to_bytes(),
+            ), self.neighbor_coords[nid], nid)
 
         # send OFFER_ASSIGNMENT to children
         for cid in self.tree.child_ids:
-            if 'cert' in parent_data and _functions['sign']:
-                body = json.dumps({
-                    'parent_id': self.tree.node_id,
+            if 'cert' in parent_data:
+                body = PIEMsgBody(json.dumps({
+                    'parent_id': self.tree.node_id.hex(),
                     'parent_coords': self.local_coords,
-                    'index': self.child_index(cid)
-                }).encode('utf-8')
-                sig = _functions['sign'](self.skey, body)
-                body = struct.pack(
-                    f'!BH{len(sig)}s{len(body)}s',
-                    len(sig),
-                    len(body),
-                    sig,
-                    body
-                )
+                    'index': self.child_index(cid),
+                    'cert': parent_data['cert']
+                }).encode('utf-8'))
             else:
-                body = json.dumps({
-                    'parent_id': self.tree.node_id,
+                body = PIEMsgBody(json.dumps({
+                    'parent_id': self.tree.node_id.hex(),
                     'parent_coords': self.local_coords,
                     'index': self.child_index(cid)
-                }).encode('utf-8')
+                }).encode('utf-8'))
+            body.sign(self.skey)
             self.send_message(PIEMessage(
                 PIEMsgType.OFFER_ASSIGNMENT,
                 self.id,
@@ -493,11 +511,8 @@ class PIETree:
                 self.local_coords,
                 self.tree.node_id,
                 [],
-                body
+                body.to_bytes()
             ), self.child_coords[cid], cid)
-
-        # send ANNOUNCE_ASSIGNMENT to neighbors
-
 
         self.invoke_hook(
             PIEEvent.AFTER_SET_PARENT,
@@ -508,7 +523,7 @@ class PIETree:
         )
 
     def add_child(self, child_id: bytes,
-                  child_data: dict|CanJsonSerialize = None,
+                  child_data: dict = {},
                   link_weight: int = 1) -> None:
         """Adds a child and calls any hooks for the BEFORE_ADD_CHILD and
             AFTER_ADD_CHILD events.
@@ -538,7 +553,10 @@ class PIETree:
             self.child_index(child_id),
             link_weight
         )
-        self.tree.child_data[child_id]['coords'] = child_coords
+        if self.tree.child_data[child_id]:
+            self.tree.child_data[child_id]['coords'] = child_coords
+        else:
+            self.tree.child_data[child_id] = {'coords': child_coords}
         self.child_coords[child_id] = child_coords
 
         self.invoke_hook(
@@ -582,7 +600,7 @@ class PIETree:
         )
 
     def add_neighbor(self, neighbor_id: bytes,
-                     neighbor_data: dict|CanJsonSerialize = None) -> None:
+                     neighbor_data: dict) -> None:
         """Adds a neighbor and calls any hooks for the
             BEFORE_ADD_NEIGHBOR and AFTER_ADD_NEIGHBOR events.
         """
@@ -757,9 +775,9 @@ class PIETree:
         ]
         for bit in list(index):
             if bit == '0':
-                new_coords.append(-link_weight)
-            else:
                 new_coords.append(link_weight)
+            else:
+                new_coords.append(-link_weight)
         return new_coords
 
     def to_json(self) -> str:

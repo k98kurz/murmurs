@@ -97,7 +97,7 @@ class LocalTree:
         )
 
     def add_child(self, child_id: bytes,
-                  child_data: dict|CanJsonSerialize = None) -> None:
+                  child_data: dict = {}) -> None:
         """Adds a child and calls any hooks for the BEFORE_ADD_CHILD and
             AFTER_ADD_CHILD events.
         """
@@ -125,8 +125,7 @@ class LocalTree:
                 self.child_ids[index] = child_id
             else:
                 self.child_ids.append(child_id)
-        if child_data:
-            self.child_data[child_id] = child_data
+        self.child_data[child_id] = child_data
 
         self.invoke_hook(
             SpanningTreeEvent.AFTER_ADD_CHILD,

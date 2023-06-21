@@ -305,6 +305,34 @@ class TestPIEMessage(unittest.TestCase):
         assert msg11.msg_id() != msg22.msg_id()
 
 
+class TestPIEMsgBody(unittest.TestCase):
+    def test_sign_works_with_set_function(self):
+        pie.set_sign_function(lambda b1, b2: b1 + b':' + b2)
+        msgbody = pie.PIEMsgBody(b'some body')
+        assert msgbody.sig == b''
+        msgbody.sign(b'privkey')
+        assert msgbody.sig == b'privkey:some body'
+
+    def test_to_bytes_and_from_bytes_e2e(self):
+        msgbody = pie.PIEMsgBody(b'some body', b'some sig')
+
+        encoded = msgbody.to_bytes()
+        assert type(encoded) is bytes
+        decoded = pie.PIEMsgBody.from_bytes(encoded)
+        assert type(decoded) is pie.PIEMsgBody
+        assert decoded.body == msgbody.body == b'some body'
+        assert decoded.sig == msgbody.sig == b'some sig'
+
+        msgbody = pie.PIEMsgBody(b'some body')
+
+        encoded = msgbody.to_bytes()
+        assert type(encoded) is bytes
+        decoded = pie.PIEMsgBody.from_bytes(encoded)
+        assert type(decoded) is pie.PIEMsgBody
+        assert decoded.body == msgbody.body == b'some body'
+        assert decoded.sig == msgbody.sig == b''
+
+
 class Sender:
     sent: list[pie.PIEMessage]
     def __init__(self) -> None:
@@ -440,17 +468,51 @@ class TestPIETree(unittest.TestCase):
 
     def test_set_parent_sends_messages(self):
         tree = pie.PIETree()
+        sender = Sender()
+        tree.add_sender(sender)
+        tree.local_coords = [2, -1]
+
         parent_id = b'parent'
         parent_coords = [-2, 1]
-        child_ids = [
-            b'child1',
-            b'child2',
-        ]
-        neighbor_ids = [
-            b'neighbor1',
-            b'neighbor2',
-            b'neighbor3',
-        ]
+        children = {
+            b'child1': [3, -2, 1],
+            b'child2': [3, -2, -1],
+        }
+        neighbors = {
+            b'neighbor1': [4, 3, 2, 1, 1],
+            b'neighbor2': [4, 3, 2, 1, -1],
+            b'neighbor3': [-2, 1],
+        }
+
+        for cid, coords in children.items():
+            tree.add_child(cid)
+            assert tree.child_coords[cid] == coords
+
+        for nid, coords in neighbors.items():
+            tree.add_neighbor(nid, {'coords': coords})
+
+        assert not sender.sent
+        tree.set_parent(parent_id, parent_coords, '10')
+        assert sender.sent
+        n_sent_to_parent = 0
+        n_sent_to_children = 0
+        n_sent_to_neighbors = 0
+        for msg in sender.sent:
+            match msg.msg_type:
+                case pie.PIEMsgType.ACCEPT_ASSIGNMENT:
+                    assert msg.dst_id == parent_id
+                    n_sent_to_parent += 1
+                case pie.PIEMsgType.OFFER_ASSIGNMENT:
+                    assert msg.dst_id in children
+                    n_sent_to_children += 1
+                case pie.PIEMsgType.ANNOUNCE_ASSIGNMENT:
+                    assert msg.dst_id in neighbors
+                    n_sent_to_neighbors += 1
+                case _:
+                    assert False
+        assert n_sent_to_parent == 1
+        assert n_sent_to_children == 2
+        assert n_sent_to_neighbors == 3
 
 
 if __name__ == '__main__':
