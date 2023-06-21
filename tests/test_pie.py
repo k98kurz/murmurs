@@ -113,6 +113,7 @@ class TestPIEMessage(unittest.TestCase):
             [-5, -4, -3, 2, -1],
         ]
         body = b'hello world'
+        seq = 12
         msg = pie.PIEMessage(
             pie.PIEMsgType.DEFAULT,
             treeid,
@@ -121,7 +122,8 @@ class TestPIEMessage(unittest.TestCase):
             src,
             src_id,
             body,
-            bifurcations
+            bifurcations,
+            seq=seq,
         )
         flow_label = msg.flow_label
         ttl = msg.ttl
@@ -141,6 +143,7 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded[6] == bifurcations
         assert decoded[7] == ttl
         assert decoded[8] == flow_label
+        assert decoded[9] == seq
 
     def test_encode_header_and_decode_header_with_big_coords_e2e(self):
         treeid = b'some tree'
@@ -153,6 +156,7 @@ class TestPIEMessage(unittest.TestCase):
             [-5, -4, -3, 2, -1],
         ]
         body = b'hello world'
+        seq = 12
         msg = pie.PIEMessage(
             pie.PIEMsgType.DEFAULT,
             treeid,
@@ -162,6 +166,7 @@ class TestPIEMessage(unittest.TestCase):
             src_id,
             body,
             bifurcations,
+            seq=seq,
         )
         ttl = msg.ttl
         flow_label = msg.flow_label
@@ -181,6 +186,7 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded[6] == bifurcations
         assert decoded[7] == ttl
         assert decoded[8] == flow_label
+        assert decoded[9] == seq
 
     def test_to_bytes_and_from_bytes_e2e(self):
         treeid = b'some tree'
@@ -193,6 +199,7 @@ class TestPIEMessage(unittest.TestCase):
             [-5, -4, -3, 2, -1],
         ]
         body = b'hello world'
+        seq = 12
         msg = pie.PIEMessage(
             pie.PIEMsgType.DEFAULT,
             treeid,
@@ -202,6 +209,7 @@ class TestPIEMessage(unittest.TestCase):
             src_id,
             body,
             bifurcations,
+            seq=seq,
         )
 
         encoded = msg.to_bytes()
@@ -216,6 +224,7 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded.src_id == msg.src_id
         assert decoded.bifurcations == msg.bifurcations
         assert decoded.body == msg.body
+        assert decoded.seq == msg.seq == seq
 
     def test_to_bytes_and_from_bytes_with_big_coords_e2e(self):
         treeid = b'some tree'
@@ -228,6 +237,7 @@ class TestPIEMessage(unittest.TestCase):
             [-5, -4, -3, 2, -1],
         ]
         body = b'hello world'
+        seq = 12
         msg = pie.PIEMessage(
             pie.PIEMsgType.DEFAULT,
             treeid,
@@ -237,6 +247,7 @@ class TestPIEMessage(unittest.TestCase):
             src_id,
             body,
             bifurcations,
+            seq=seq,
         )
 
         encoded = msg.to_bytes(True)
@@ -252,6 +263,34 @@ class TestPIEMessage(unittest.TestCase):
         assert decoded.src_id == msg.src_id
         assert decoded.bifurcations == msg.bifurcations
         assert decoded.body == msg.body
+        assert decoded.seq == msg.seq == seq
+
+    def test_header_id_is_unique_and_deterministic_for_each_header_and_disregards_ttl(self):
+        treeid = b'some tree'
+        dst1 = [5, -4, 3, -2, 2, 1]
+        dst2 = [-5, 4, 3, 2, -1]
+        src = [4, 3, -3, -2, 1, -1]
+        dst1_id = b'dst1'
+        dst2_id = b'dst2'
+        src_id = b'src'
+        body1 = b'hello world'
+        flow_label1 = b'1234'
+        flow_label2 = b'abcd'
+        msg1 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
+                              src, src_id, body1, flow_label=flow_label1, ttl=255)
+        msg11 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst1, dst1_id,
+                              src, src_id, body1, flow_label=flow_label1, ttl=12)
+        msg2 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
+                               src, src_id, body1, flow_label=flow_label2, ttl=1)
+        msg22 = pie.PIEMessage(pie.PIEMsgType.DEFAULT, treeid, dst2, dst2_id,
+                               src, src_id, body1, flow_label=flow_label2, ttl=20)
+
+        assert type(msg1.header_id()) is bytes
+        assert msg1.header_id() == msg1.header_id()
+        assert msg1.header_id() == msg11.header_id()
+        assert msg2.header_id() == msg2.header_id()
+        assert msg2.header_id() == msg22.header_id()
+        assert msg1.header_id() != msg2.header_id()
 
     def test_body_id_is_unique_and_deterministic_for_each_body(self):
         treeid = b'some tree'

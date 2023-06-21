@@ -24,6 +24,9 @@ class PIEEvent(Enum):
     RECEIVE_ACK = auto()
     RECEIVE_PING = auto()
     RECEIVE_ECHO = auto()
+    RECEIVE_TRACE_ROUTE = auto()
+    RECEIVE_TRACE_ROUTE_ECHO = auto()
+    RECEIVE_SET_ROOT = auto()
     SEND_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
     BEFORE_SET_PARENT = auto()
@@ -67,6 +70,7 @@ class PIEMessage:
     bifurcations: list[list[int]] = field(default_factory=list)
     ttl: int = field(default=255)
     flow_label: bytes = field(default_factory=lambda: token_bytes(4))
+    seq: int = field(default=0)
     last_hop: list[int] = field(default=None)
 
     def encode_header(self, use_big_coords: bool = False) -> bytes:
@@ -89,12 +93,13 @@ class PIEMessage:
         )
 
         return struct.pack(
-            f'!BBB4s{len(self.treeid)}sB{len(dst)}sB{len(self.dst_id)}sB' +
+            f'!BBB4sB{len(self.treeid)}sB{len(dst)}sB{len(self.dst_id)}sB' +
             f'{len(src)}sB{len(self.src_id)}s{len(bifurcations)}s',
             self.msg_type.value,
             len(self.treeid),
             self.ttl,
             self.flow_label,
+            self.seq,
             self.treeid,
             len(dst),
             dst,
@@ -122,8 +127,8 @@ class PIEMessage:
     @staticmethod
     def decode_header(header: bytes, use_big_coords: bool = False) -> tuple:
         """Decode header fields from bytes."""
-        msg_type, treeid_len, ttl, flow_label, header = struct.unpack(
-            f'!BBB4s{len(header)-7}s',
+        msg_type, treeid_len, ttl, flow_label, seq, header = struct.unpack(
+            f'!BBB4sB{len(header)-8}s',
             header
         )
         treeid, dst_len, header = struct.unpack(
@@ -182,7 +187,8 @@ class PIEMessage:
             src_id,
             bifurcations,
             ttl,
-            flow_label
+            flow_label,
+            seq
         )
 
     @classmethod
@@ -194,18 +200,48 @@ class PIEMessage:
             data
         )
         vert(len(body) == body_len, 'message body length mismatch')
-        msg_type, treeid, dst, dst_id, src, src_id, bifurcations, ttl, flow_label = \
-            cls.decode_header(header, use_big_coords)
+        msg_type, treeid, dst, dst_id, src, src_id, bifurcations, ttl, \
+            flow_label, seq = cls.decode_header(header, use_big_coords)
         return cls(msg_type, treeid, dst, dst_id, src, src_id, body,
-                   bifurcations=bifurcations, ttl=ttl, flow_label=flow_label)
+                   bifurcations=bifurcations, ttl=ttl, flow_label=flow_label,
+                   seq=seq)
+
+    def header_id(self, use_big_coords: bool = False) -> bytes:
+        """Returns a unique ID for the message header excluding ttl."""
+        if use_big_coords:
+            src = encode_big_coordinates(self.src)
+            dst = encode_big_coordinates(self.dst)
+        else:
+            src = encode_coordinates(self.src)
+            dst = encode_coordinates(self.dst)
+
+        header = struct.pack(
+            f'!BB4sB{len(self.treeid)}sB{len(dst)}sB{len(self.dst_id)}sB' +
+            f'{len(src)}sB{len(self.src_id)}s',
+            self.msg_type.value,
+            len(self.treeid),
+            self.flow_label,
+            self.seq,
+            self.treeid,
+            len(dst),
+            dst,
+            len(self.dst_id),
+            self.dst_id,
+            len(src),
+            src,
+            len(self.src_id),
+            self.src_id
+        )
+
+        return sha256(header).digest()[:16]
 
     def body_id(self) -> bytes:
         """Returns a unique ID for the message body."""
         return sha256(self.body).digest()[:16]
 
-    def msg_id(self) -> bytes:
+    def msg_id(self, use_big_coords: bool = False) -> bytes:
         """Returns a unique ID for the message."""
-        return sha256(self.to_bytes()).digest()[:16]
+        return sha256(self.header_id(use_big_coords) + self.body_id()).digest()[:16]
 
 
 @dataclass
@@ -363,7 +399,7 @@ class SrcAidedRouteTable:
     """Route table for storing"""
     bifurcations: dict[tuple[bytes, list[int]], tuple[int, list[list[int]]]] = field(default_factory=dict)
 
-    def set_bifurcations(self, tree_id: bytes, dst: list[int], bifurcations: list[list[str]]) -> None:
+    def set_bifurcations(self, tree_id: bytes, dst: list[int], bifurcations: list[list[int]]) -> None:
         """Set bifurcations for a destination on a tree."""
         tert(type(tree_id) is bytes, 'tree_id must be bytes')
         tert(type(dst) is list, 'dst must be list of ints')
@@ -378,6 +414,13 @@ class SrcAidedRouteTable:
         tert(all(type(coord) is int for coord in dst), 'dst must be list of ints')
         return self.bifurcations[(tree_id.hex(), dst)] if (tree_id.hex(), dst) in self.bifurcations else []
 
+    def add_bifurcation(self, tree_id: bytes, dst: list[int], bifurcation: list[int]) -> None:
+        """Adds a bifurcation."""
+        bifs = self.get_bifurcations(tree_id, dst)
+        if bifurcation not in bifs:
+            bifs.append(bifurcation)
+        self.set_bifurcations(tree_id, dst, bifs)
+
     def to_json(self) -> str:
         """Return instance data serialized to json."""
         return json.dumps(self.bifurcations)
@@ -390,7 +433,8 @@ class SrcAidedRouteTable:
 
 class PIETree:
     id: bytes
-    config: dict|CanJsonSerialize
+    config: dict
+    root: bytes
     skey: bytes
     tree: LocalTree
     locality_level: int
@@ -403,6 +447,7 @@ class PIETree:
 
     def __init__(self, id: bytes = None,
                  config: dict|CanJsonSerialize = {},
+                 root: bytes = None,
                  skey: bytes = None,
                  tree: LocalTree = None,
                  locality_level: int = 0,
@@ -412,11 +457,10 @@ class PIETree:
                  neighbor_coords: dict[bytes, list[int]] = None,
                  route_table: SrcAidedRouteTable = None) -> None:
         self.id = id if id else uuid4().bytes
+        self.root = root
         if config:
-            if isinstance(config, CanJsonSerialize):
-                self.id = sha256(config.to_json().encode()).digest()[:16]
-            else:
-                self.id = sha256(json.dumps(config).encode()).digest()[:16]
+            self.id = sha256(json.dumps(config).encode('utf-8')).digest()[:16]
+            self.root = self.root or (config['init_root'] if 'init_root' in config else None)
         self.skey = skey if skey else token_bytes(32)
         self.tree = tree if tree else LocalTree(id)
         self.locality_level = locality_level
@@ -747,7 +791,8 @@ class PIETree:
         bifurcation = None
         reverse_msg = PIEMessage(PIEMsgType.DEFAULT, self.id,
                                     message.src, message.src_id,
-                                    message.dst, message.dst_id, b'')
+                                    message.dst, message.dst_id, b'',
+                                    flow_label=message.flow_label)
         last_hop = self.calculate_next_hop(reverse_msg)
         if message.last_hop:
             if last_hop[1] != message.last_hop:
@@ -891,8 +936,60 @@ class PIETree:
                     bifurcations=self.route_table.get_bifurcations(self.id, message.src)
                 ))
             case PIEMsgType.ECHO:
-                msgbody
-
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_ECHO,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+            case PIEMsgType.TRACE_ROUTE:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_TRACE_ROUTE,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+                self.respond_to_trace_route(message)
+            case PIEMsgType.TRACE_ROUTE_ECHO:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_TRACE_ROUTE_ECHO,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+                if msgbody.body:
+                    if 'use_big_coords' in self.config:
+                        bif = decode_big_coordinates(msgbody.body)
+                    else:
+                        bif = decode_coordinates(msgbody.body)
+                    self.route_table.add_bifurcation(
+                        self.id,
+                        message.dst,
+                        bif
+                    )
+            case PIEMsgType.SET_ROOT:
+                ...
+            case PIEMsgType.OFFER_ASSIGNMENT:
+                ...
+            case PIEMsgType.REQUEST_ASSIGNMENT:
+                ...
+            case PIEMsgType.ACCEPT_ASSIGNMENT:
+                ...
+            case PIEMsgType.ANNOUNCE_ASSIGNMENT:
+                ...
+            case PIEMsgType.RELEASE_ASSIGNMENT:
+                ...
+            case PIEMsgType.ACKNOWLEDGE_MESSAGE:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_ACK,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
 
     def send_message(self, message: PIEMessage, peer_coords: list[int],
                      peer_id: bytes) -> None:
@@ -946,16 +1043,25 @@ class PIETree:
 
     def to_json(self) -> str:
         """Returns a json str encoding the instance data."""
-        tree = b64encode(self.tree.to_json())
+        tree = b64encode(self.tree.to_json()).decode('utf-8')
+        table = b64encode(self.route_table.to_json()).decode('utf-8')
         return json.dumps({
             'id': self.id.hex(),
+            'config': self.config,
+            'root': self.root,
             'skey': self.skey.hex(),
-            'tree': str(tree, 'utf-8'),
+            'tree': tree,
+            'locality_level': self.locality_level,
             'local_coords': self.local_coords,
             'child_coordinates': {
                 cid.hex(): coords
                 for cid, coords in self.child_coords.items()
-            }
+            },
+            'neighbor_coords': {
+                nid.hex(): coords
+                for nid, coords in self.neighbor_coords.items()
+            },
+            'route_table': table,
         })
 
     @classmethod
@@ -966,10 +1072,20 @@ class PIETree:
             bytes.fromhex(cid): coords
             for cid, coords in unpacked['child_coordinates']
         }
+        neighbor_coords = {
+            bytes.fromhex(nid): coords
+            for nid, coords in unpacked['neighbor_coordinates']
+        }
+        table = SrcAidedRouteTable.from_json(b64decode(unpacked['route_table']))
         return cls(
             id=bytes.fromhex(unpacked['id']),
+            config=unpacked['config'],
+            root=unpacked['root'],
             skey=bytes.fromhex(unpacked['skey']),
             tree=LocalTree.from_json(b64decode(unpacked['tree'])),
+            locality_level=unpacked['locality_level'],
             local_coords=unpacked['local_coords'],
-            child_coordinates=child_coords
+            child_coords=child_coords,
+            neighbor_coords=neighbor_coords,
+            route_table=table,
         )
