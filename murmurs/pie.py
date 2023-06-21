@@ -29,6 +29,7 @@ class PIEEvent(Enum):
     RECEIVE_SET_ROOT = auto()
     RECEIVE_OFFER_ASSIGNMENT = auto()
     RECEIVE_REQUEST_ASSIGNMENT = auto()
+    RECEIVE_ACCEPT_ASSIGNMENT = auto()
     RECEIVE_ANNOUNCE_ASSIGNMENT = auto()
     RECEIVE_RELEASE_ASSIGNMENT = auto()
     SET_ROOT = auto()
@@ -445,12 +446,13 @@ class PIETree:
 
     def __init__(self, id: bytes = None,
                  config: dict|CanJsonSerialize = {},
-                 root: bytes = None,
+                 root: bytes = b'',
                  skey: bytes = None,
                  tree: LocalTree = None,
                  locality_level: int = 0,
                  node_id: bytes = None,
                  local_coords: list[int] = None,
+                 assignment_cert: bytes = None,
                  child_coords: dict[bytes, list[int]] = None,
                  neighbor_coords: dict[bytes, list[int]] = None,
                  route_table: SrcAidedRouteTable = None) -> None:
@@ -468,6 +470,7 @@ class PIETree:
         if node_id:
             self.tree.node_id = node_id
         self.local_coords = local_coords or []
+        self.assignment_cert = assignment_cert or b''
         self.child_coords = child_coords or {}
         self.neighbor_coords = neighbor_coords or {}
         self.senders = []
@@ -600,37 +603,45 @@ class PIETree:
         """Send OFFER_ASSIGNMENT to children and turn them into neighbors."""
         child_ids = [*self.tree.child_ids]
         for cid in child_ids:
-            if 'cert' in parent_data:
-                child_cert = self.make_cert({
-                    'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
-                    'coords': self.local_coords,
-                    'index': self.child_index(cid),
-                }, base_cert=b64decode(parent_data['cert']))
-                body = PIEMsgBody(child_cert)
-            else:
-                body = PIEMsgBody(json.dumps({
-                    'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
-                    'coords': self.local_coords,
-                    'index': self.child_index(cid),
-                    'root': self.root
-                }).encode('utf-8'))
-            body.sign(self.skey)
             try:
-                self.send_message(PIEMessage(
-                    PIEMsgType.OFFER_ASSIGNMENT,
-                    self.id,
-                    self.child_coords[cid],
-                    cid,
-                    self.local_coords,
-                    self.tree.node_id,
-                    [],
-                    body.to_bytes()
-                ), cid)
+                msg = self._make_offer_assignment_msg(
+                    cid, self.child_coords[cid], parent_data
+                )
+                self.send_message(msg, cid)
                 self.add_neighbor(cid, self.tree.child_data[cid])
             except UnicastException:
                 ...
             finally:
                 self.remove_child(cid)
+
+    def _make_offer_assignment_msg(self, peer_id: bytes, peer_coords: list[int],
+                                   parent_data: dict = {}) -> PIEMessage:
+        """Create a PIEMessage that offers assignment to a peer."""
+        if 'cert' in parent_data:
+            child_cert = self.make_cert({
+                'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
+                'coords': self.local_coords,
+                'index': self.child_index(peer_id),
+            }, base_cert=b64decode(parent_data['cert']))
+            body = PIEMsgBody(child_cert)
+        else:
+            body = PIEMsgBody(json.dumps({
+                'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
+                'coords': self.local_coords,
+                'index': self.child_index(peer_id),
+                'root': b64encode(self.root).decode('utf-8')
+            }).encode('utf-8'))
+        body.sign(self.skey)
+        return PIEMessage(
+            PIEMsgType.OFFER_ASSIGNMENT,
+            self.id,
+            peer_coords,
+            peer_id,
+            self.local_coords,
+            self.tree.node_id,
+            body.to_bytes(),
+            ttl=1
+        )
 
     def make_cert(self, cert_data: dict, base_cert: bytes = b'') -> bytes:
         """Makes a signed certificate."""
@@ -1012,34 +1023,34 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                ...
+                self._handle_request_assignment(message)
             case PIEMsgType.ACCEPT_ASSIGNMENT:
                 self.invoke_hook(
-                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    PIEEvent.RECEIVE_ACCEPT_ASSIGNMENT,
                     {
                         'message': message,
                         'msgbody': msgbody
                     }
                 )
-                ...
+                self._handle_accept_assignment(message, msgbody)
             case PIEMsgType.ANNOUNCE_ASSIGNMENT:
                 self.invoke_hook(
-                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    PIEEvent.RECEIVE_ANNOUNCE_ASSIGNMENT,
                     {
                         'message': message,
                         'msgbody': msgbody
                     }
                 )
-                ...
+                self._handle_announce_assignment(message, msgbody)
             case PIEMsgType.RELEASE_ASSIGNMENT:
                 self.invoke_hook(
-                    PIEEvent.RECEIVE_REQUEST_ASSIGNMENT,
+                    PIEEvent.RECEIVE_RELEASE_ASSIGNMENT,
                     {
                         'message': message,
                         'msgbody': msgbody
                     }
                 )
-                ...
+                self._handle_release_assignment(message, msgbody)
             case PIEMsgType.ACKNOWLEDGE_MESSAGE:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_ACK,
@@ -1150,8 +1161,58 @@ class PIETree:
             tressa(callable(_functions['check_sig']), 'missing callable check_sig function')
             vert('cert' in data, 'missing cert data')
             vert('sig' in data, 'missing sig data')
+            cert = data['cert']
+            if self.check_cert(b64decode(cert)):
+                cert_data = json.loads(b64decode(cert))
+                parent_id = b64decode(cert_data['parent_id'])
+                parent_data = {'cert': cert, 'coords': cert_data['coords']}
+                self.set_parent(parent_id, cert_data['coords'], cert_data['index'],
+                                other_parent_data=parent_data)
         else:
+            vert('parent_id' in data, 'assignment offer missing parent_id')
+            vert('coords' in data, 'assignment offer missing coords')
+            vert('index' in data, 'assignment offer missing index')
+            vert('root' in data, 'assignment offer missing root')
+            parent_id = b64decode(data['parent_id'])
+            coords = data['coords']
+            index = data['index']
+            root = b64decode(data['root'])
+            if root != self.root:
+                if self.try_elect_root(root):
+                    self.set_parent(parent_id, coords, index)
+
+    def _handle_request_assignment(self, message: PIEMessage) -> None:
+        """Handle an assignment request."""
+        if 'use_certs' in self.config:
+            msg = self._make_offer_assignment_msg(
+                message.src_id, message.src, {
+                    'cert': self.assignment_cert,
+                }
+            )
+        else:
+            msg = self._make_offer_assignment_msg(message.src_id, message.src)
+
+        msg.flow_label = message.flow_label
+        seq = message.seq + 1
+        msg.seq = seq if seq <= 255 else 0
+
+        try:
+            self.send_message(msg, message.src_id)
+        except UnicastException:
             ...
+
+    def _handle_accept_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Handle an ACCEPT_ASSIGNMENT message from new child."""
+        body = json.loads(msgbody.body)
+        ...
+
+    def _handle_announce_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Handle an ANNOUNCE_ASSIGNMENT message from neighbor."""
+        ...
+
+    def _handle_release_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
+        """Handle an RELEASE_ASSIGNMENT message from child or neighbor."""
+        ...
 
     def send_message(self, message: PIEMessage, peer_id: bytes,
                      peer_coords: list[int] = []) -> None:
