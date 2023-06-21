@@ -807,11 +807,13 @@ class PIETree:
                 bifurcation = encode_coordinates(bifurcation)
         body = PIEMsgBody(bifurcation)
         body.sign(self.skey)
+        seq = message.seq + 255 - message.ttl
+        seq = seq if seq < 256 else 255
         reverse_msg = PIEMessage(PIEMsgType.TRACE_ROUTE_ECHO, self.id,
                                     message.src, message.src_id,
                                     self.local_coords, self.tree.node_id,
-                                    body.to_bytes(), flow_label=message.flow_label,
-                                    seq=message.seq + 255 - message.ttl)
+                                    body.to_bytes(), seq=seq,
+                                    flow_label=message.flow_label)
         self.send_message(reverse_msg, last_hop[0], last_hop[1])
 
     def calculate_next_hop(self, message: PIEMessage) -> tuple[bytes, list[int]]:
@@ -900,23 +902,27 @@ class PIETree:
 
                 if peer_id not in self.tree.child_ids and \
                     peer_id not in self.tree.neighbor_ids:
-                    self.add_neighbor(peer_id, peer_info)
                     # respond with HELLO
                     msgbody = PIEMsgBody(json.dumps({
                         'id': self.tree.node_id.hex(),
                         'coords': self.local_coords
                     }).encode('utf-8'))
                     msgbody.sign(self.skey)
-                    self.send_message(PIEMessage(
-                        PIEMsgType.HELLO,
-                        self.id,
-                        message.src,
-                        message.src_id,
-                        self.local_coords,
-                        self.tree.node_id,
-                        msgbody.to_bytes(),
-                        ttl=1
-                    ), message.src_id, message.src)
+                    try:
+                        self.send_message(PIEMessage(
+                            PIEMsgType.HELLO,
+                            self.id,
+                            message.src,
+                            message.src_id,
+                            self.local_coords,
+                            self.tree.node_id,
+                            msgbody.to_bytes(),
+                            ttl=1
+                        ), message.src_id)
+                        # add neighbor if reachable
+                        self.add_neighbor(peer_id, peer_info)
+                    except UnicastException:
+                        ...
             case PIEMsgType.PING:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_PING,
@@ -927,6 +933,8 @@ class PIETree:
                 )
                 rsp_body = PIEMsgBody(message.body_id())
                 rsp_body.sign(self.skey)
+                seq = message.seq + 255 - message.ttl
+                seq = seq if seq < 256 else 255
                 self.route_message(PIEMessage(
                     PIEMsgType.ECHO,
                     self.id,
@@ -935,7 +943,9 @@ class PIETree:
                     self.local_coords,
                     self.tree.node_id,
                     rsp_body.to_bytes(),
-                    bifurcations=self.route_table.get_bifurcations(self.id, message.src)
+                    bifurcations=self.route_table.get_bifurcations(self.id, message.src),
+                    flow_label=message.flow_label,
+                    seq=seq
                 ))
             case PIEMsgType.ECHO:
                 self.invoke_hook(

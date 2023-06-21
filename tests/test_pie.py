@@ -374,6 +374,24 @@ class TestPIEMsgBody(unittest.TestCase):
         assert decoded.body == msgbody.body == b'some body'
         assert decoded.sig == msgbody.sig == b''
 
+        msgbody = pie.PIEMsgBody(b'', b'some sig')
+
+        encoded = msgbody.to_bytes()
+        assert type(encoded) is bytes
+        decoded = pie.PIEMsgBody.from_bytes(encoded)
+        assert type(decoded) is pie.PIEMsgBody
+        assert decoded.body == msgbody.body == b''
+        assert decoded.sig == msgbody.sig == b'some sig'
+
+        msgbody = pie.PIEMsgBody(b'')
+
+        encoded = msgbody.to_bytes()
+        assert type(encoded) is bytes
+        decoded = pie.PIEMsgBody.from_bytes(encoded)
+        assert type(decoded) is pie.PIEMsgBody
+        assert decoded.body == msgbody.body == b''
+        assert decoded.sig == msgbody.sig == b''
+
 
 class Sender:
     sent: list[pie.PIEMessage]
