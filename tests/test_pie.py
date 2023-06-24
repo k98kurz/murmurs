@@ -31,6 +31,18 @@ class TestPIEFunctions(unittest.TestCase):
         pie.set_elect_root_func(func)
         assert pie._functions['elect_root'] is func
 
+    def test_set_make_auth_func(self):
+        func = lambda b1, b2, i: len(b1) == len(b2) == i
+        assert pie._functions['make_auth'] is not func
+        pie.set_make_auth_func(func)
+        assert pie._functions['make_auth'] is func
+
+    def test_set_check_auth_func(self):
+        func = lambda b1, b2, i: len(b1) == len(b2) == i
+        assert pie._functions['check_auth'] is not func
+        pie.set_check_auth_func(func)
+        assert pie._functions['check_auth'] is func
+
     def test_signed_int_to_bytes(self):
         b1 = pie.signed_int_to_bytes(11)
         b2 = pie.signed_int_to_bytes(-11)
@@ -78,8 +90,18 @@ class TestPIEFunctions(unittest.TestCase):
         coords = [5, -4, -3, 2, -2, 1]
         encoded = pie.encode_coordinates(coords)
         assert type(encoded) is bytes
-        assert len(encoded) == len(coords)
+        assert len(encoded) % 2 == 0
         decoded = pie.decode_coordinates(encoded)
+        assert type(decoded) is list
+        assert all(type(d) is int for d in decoded)
+        assert decoded == coords
+
+    def test_encode_small_coordinates_and_decode_small_coordinates_e2e(self):
+        coords = [5, -4, -3, 2, -2, 1]
+        encoded = pie.encode_small_coordinates(coords)
+        assert type(encoded) is bytes
+        assert len(encoded) == len(coords)
+        decoded = pie.decode_small_coordinates(encoded)
         assert type(decoded) is list
         assert all(type(d) is int for d in decoded)
         assert decoded == coords

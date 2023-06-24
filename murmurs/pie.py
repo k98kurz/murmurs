@@ -282,6 +282,8 @@ _functions = {
     'sign': None,
     'check_sig': None,
     'elect_root': None,
+    'make_auth': None,
+    'check_auth': None,
 }
 
 
@@ -312,6 +314,24 @@ def set_elect_root_func(func: Callable[[bytes, bytes, int], bool]) -> None:
     """
     tert(callable(func), 'func must be Callable[[bytes, bytes, int], bool]')
     _functions['elect_root'] = func
+
+
+def set_make_auth_func(func: Callable[[bytes, bytes], bytes]) -> None:
+    """Sets a function for making auth data. Function must take the
+        bytes auth config and bytes node ID as args and return bytes
+        auth data.
+    """
+    tert(callable(func), 'func must be Callable[[bytes, bytes], bytes]')
+    _functions['make_auth'] = func
+
+
+def set_check_auth_func(func: Callable[[bytes, bytes, bytes], bool]) -> None:
+    """Sets a function for checking auth data. Function must take the
+        bytes auth root, bytes node ID, and bytes auth data as args and
+        return True if the auth data is valid and False otherwise.
+    """
+    tert(callable(func), 'func must be Callable[[bytes, bytes, bytes], bool]')
+    _functions['check_auth'] = func
 
 
 def signed_int_to_bytes(number: int) -> bytes:
@@ -354,14 +374,77 @@ def bytes_to_int(number: bytes) -> int:
     return number - 2**size if negative else number
 
 
+def _pack_coord_group(coords: list[int]) -> bytes:
+    """Packs a coord group into 2 bytes per 7 coords."""
+    tert(type(coords) is list, 'coords must be list[int]')
+    tert(all(type(c) is int for c in coords), 'coords must be list[int]')
+    magnitude = abs(coords[0])
+    signs = '1'
+    size = len(coords) if len(coords) < 7 else 7
+    for i in range(size):
+        signs += '0' if coords[i] > 0 else '1'
+
+    first_7 = int(signs, 2).to_bytes(1, 'big') + magnitude.to_bytes(1, 'big')
+
+    if len(coords) > 7:
+        return first_7 + _pack_coord_group(magnitude, coords[7:])
+    return first_7
+
+def _unpack_coord_group(group: bytes) -> list[int]:
+    """Unpacks a coord gorup from 2 bytes into list of signed ints."""
+    tert(type(group) is bytes, 'group must be 2 bytes')
+    vert(len(group) == 2, 'group must be 2 bytes')
+    signs = bin(group[0]).split('b')[1]
+    magnitude = group[1]
+    size = len(signs) - 1
+    signs = signs[1:]
+    coords = []
+
+    for i in range(size):
+        coords.append(magnitude if signs[i] == '0' else -magnitude)
+
+    return coords
+
 def encode_coordinates(coordinates: list[int]) -> bytes:
     """Encodes coordinates into a reasonably compact bytes format."""
-    coords = [int_to_1_byte(c) for c in coordinates]
+    # first group by magnitude
+    coord_groups = {}
+    for c in coordinates:
+        if abs(c) not in coord_groups:
+            coord_groups[abs(c)] = []
+        coord_groups[abs(c)].append(c)
+
+    # encode signs by grouping up to 7 of the same magnitude
+    coords = []
+    for magnitude in coord_groups:
+        coords.append(_pack_coord_group(coord_groups[magnitude]))
     return b''.join(coords)
 
 def decode_coordinates(encoded: bytes) -> list[int]:
     """Decodes coordinates from a reasonably compact bytes format."""
     tert(type(encoded) is bytes, 'encoded must be bytes of len%2=0')
+    vert(len(encoded) % 2 == 0, 'encoded must be bytes of len%2=0')
+    coords = []
+    index = 0
+
+    while index < len(encoded):
+        coords.extend(_unpack_coord_group(encoded[index:index+2]))
+        index += 2
+
+    return coords
+
+def encode_small_coordinates(coordinates: list[int]) -> bytes:
+    """Encodes coordinates into a compact bytes format with max
+        magnitude of 127.
+    """
+    coords = [int_to_1_byte(c) for c in coordinates]
+    return b''.join(coords)
+
+def decode_small_coordinates(encoded: bytes) -> list[int]:
+    """Decodes coordinates from compact bytes format with max magnitude
+        of 127.
+    """
+    tert(type(encoded) is bytes, 'encoded must be bytes')
     coords = []
     index = 0
 
