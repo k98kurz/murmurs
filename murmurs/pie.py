@@ -406,7 +406,11 @@ def _unpack_coord_group(group: bytes) -> list[int]:
     return coords
 
 def encode_coordinates(coordinates: list[int]) -> bytes:
-    """Encodes coordinates into a reasonably compact bytes format."""
+    """Encodes coordinates into a compact bytes format. Max magnitude is
+        255, and every 7 coordinates with the same magnitude are encoded
+        into 2 bytes maintaining the magnitude and sign of each
+        coordinate.
+    """
     # first group by magnitude
     coord_groups = {}
     for c in coordinates:
@@ -421,7 +425,11 @@ def encode_coordinates(coordinates: list[int]) -> bytes:
     return b''.join(coords)
 
 def decode_coordinates(encoded: bytes) -> list[int]:
-    """Decodes coordinates from a reasonably compact bytes format."""
+    """Decodes coordinates from a compact bytes format. Max mangitude is
+        255, and every 2 bytes encode up to 7 coordinates sharing a
+        magnitude, with the first byte encoding the number of coords and
+        the signs of each.
+    """
     tert(type(encoded) is bytes, 'encoded must be bytes of len%2=0')
     vert(len(encoded) % 2 == 0, 'encoded must be bytes of len%2=0')
     coords = []

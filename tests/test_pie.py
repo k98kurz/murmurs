@@ -119,6 +119,52 @@ class TestPIEFunctions(unittest.TestCase):
         assert len(encoded) != len(encoded2)
         assert pie.decode_big_coordinates(encoded2) == coords2
 
+    def test_encode_coordinates_saves_space_for_high_connectivity(self):
+        """Networks/graphs with high connectivity have long child
+            indices, which means many coordinates of repeated magnitude.
+            The encode_coordinates function compacts coordinate groups
+            sharing magnitude into two bytes per 7 coords.
+        """
+        coords = [5, -5, -5, 4, 4, -3, -3, 3, 2, -2, -2, 2, 1, -1]
+        encoded1 = pie.encode_coordinates(coords)
+        encoded2 = pie.encode_small_coordinates(coords)
+        encoded3 = pie.encode_big_coordinates(coords)
+
+        assert len(encoded1) < len(encoded2) < len(encoded3)
+
+    def test_encode_small_coordinates_saves_space_for_low_connectivity(self):
+        """Networks/graphs with low connectivity have short child
+            indices, which means few coordinates of repeated magnitude.
+            The encode_small_coordinates function compacts each coord
+            into a single byte with maximum magnitude of 127.
+        """
+        coords = [8, -7, -6, 5, -4, 3, -2, 1]
+        encoded1 = pie.encode_small_coordinates(coords)
+        encoded2 = pie.encode_coordinates(coords)
+        encoded3 = pie.encode_big_coordinates(coords)
+
+        assert len(encoded1) < len(encoded2)
+        assert len(encoded1) < len(encoded3)
+        assert len(encoded2) == len(encoded3)
+
+    def test_encode_big_coordinates_can_encode_coords_that_other_encodings_cannot(self):
+        """Networks/graphs with paths with greater than 255 hops or that
+            use link weights greater than 1 must use
+            encode_big_coordinates to encode coordinates.
+        """
+        coords = [300, -299, 299, 288, -270, 120, -110, -82, 33, 13, -5]
+        encoded1 = pie.encode_big_coordinates(coords)
+        decoded1 = pie.decode_big_coordinates(encoded1)
+        assert decoded1 == coords
+
+        with self.assertRaises(OverflowError) as e:
+            pie.encode_coordinates(coords)
+        assert str(e.exception) == 'int too big to convert'
+
+        with self.assertRaises(OverflowError) as e:
+            pie.encode_small_coordinates(coords)
+        assert str(e.exception) == 'int too big to convert'
+
 
 class TestPIEMessage(unittest.TestCase):
     def test_encode_header_and_decode_header_e2e(self):
