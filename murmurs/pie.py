@@ -351,6 +351,14 @@ def signed_int_to_bytes(number: int) -> bytes:
 
     return number.to_bytes(n_bytes, 'big')
 
+def unsigned_int_to_bytes(number: int) -> bytes:
+    """Convert from arbitrarily large unsigned int to bytes."""
+    tert(type(number) is int, 'number must be int')
+    n_bits = floor(log2(number)) + 1 if number != 0 else 1
+    n_bytes = ceil(n_bits/8)
+
+    return number.to_bytes(n_bytes, 'big')
+
 def int_to_1_byte(number: int) -> bytes:
     """Convert from signed int in [-128, 127] to bytes."""
     tert(type(number) is int, 'number must be int')
@@ -462,23 +470,75 @@ def decode_small_coordinates(encoded: bytes) -> list[int]:
 
     return [bytes_to_int(c) for c in coords]
 
+def _pack_big_coord_group(coords: list[int]) -> bytes:
+    """Packs a coord group into 7 coords."""
+    tert(type(coords) is list, 'coords must be list[int]')
+    tert(all(type(c) is int for c in coords), 'coords must be list[int]')
+    magnitude = abs(coords[0])
+    magnitude = unsigned_int_to_bytes(magnitude)
+    mag_size = len(magnitude).to_bytes(1, 'big')
+    signs = '1'
+    size = len(coords) if len(coords) < 7 else 7
+    for i in range(size):
+        signs += '0' if coords[i] > 0 else '1'
+
+    first_7 = int(signs, 2).to_bytes(1, 'big') + mag_size + magnitude
+
+    if len(coords) > 7:
+        return first_7 + _pack_big_coord_group(coords[7:])
+    return first_7
+
+def _unpack_big_coord_group(group: bytes) -> tuple[list[int], int]:
+    """Unpacks a coord gorup from N>2 bytes into list of signed ints."""
+    tert(type(group) is bytes, 'group must be bytes with len>2')
+    vert(len(group) > 2, 'group must be bytes with len>2')
+    signs = bin(group[0]).split('b')[1]
+    mag_size = group[1]
+    magnitude = int.from_bytes(group[2:mag_size+2], 'big')
+    size = len(signs) - 1
+    signs = signs[1:]
+    coords = []
+
+    for i in range(size):
+        coords.append(magnitude if signs[i] == '0' else -magnitude)
+
+    return (coords, mag_size+2)
+
 def encode_big_coordinates(coordinates: list[int]) -> bytes:
-    """Encodes coordinates into an adaptive bytes format."""
-    coords = [signed_int_to_bytes(c) for c in coordinates]
-    coords = [len(c).to_bytes(1, 'big') + c for c in coords]
+    """Encodes coordinates into a compact, adaptive bytes format without
+        maximum magnitude. Every 7 coordinates sharing a magnitude are
+        encoded into 2 bytes maintaining the magnitude and sign of each
+        coordinate.
+    """
+    # first group by magnitude
+    coord_groups = {}
+    for c in coordinates:
+        if abs(c) not in coord_groups:
+            coord_groups[abs(c)] = []
+        coord_groups[abs(c)].append(c)
+
+    # encode signs by grouping up to 7 of the same magnitude
+    coords = []
+    for magnitude in coord_groups:
+        coords.append(_pack_big_coord_group(coord_groups[magnitude]))
     return b''.join(coords)
 
 def decode_big_coordinates(encoded: bytes) -> list[int]:
-    """Decodes coordinates from an adaptive bytes format."""
+    """Decodes coordinates into a compact, adaptive bytes format without
+        maximum magnitude. Every 7 coordinates sharing a magnitude are
+        encoded into 2 bytes maintaining the magnitude and sign of each
+        coordinate.
+    """
+    tert(type(encoded) is bytes, 'encoded must be bytes')
     coords = []
     index = 0
 
     while index < len(encoded):
-        size = encoded[index]
-        coords.append(encoded[index+1:index+1+size])
-        index += 1 + size
+        unpacked, advance = _unpack_big_coord_group(encoded[index:])
+        coords.extend(unpacked)
+        index += advance
 
-    return [bytes_to_int(c) for c in coords]
+    return coords
 
 
 @dataclass

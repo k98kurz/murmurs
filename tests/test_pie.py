@@ -143,9 +143,7 @@ class TestPIEFunctions(unittest.TestCase):
         encoded2 = pie.encode_coordinates(coords)
         encoded3 = pie.encode_big_coordinates(coords)
 
-        assert len(encoded1) < len(encoded2)
-        assert len(encoded1) < len(encoded3)
-        assert len(encoded2) == len(encoded3)
+        assert len(encoded1) < len(encoded2) < len(encoded3)
 
     def test_encode_big_coordinates_can_encode_coords_that_other_encodings_cannot(self):
         """Networks/graphs with paths with greater than 255 hops or that
