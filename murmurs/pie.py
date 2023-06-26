@@ -260,6 +260,11 @@ class PIEMsgBody:
         if _functions['sign']:
             self.sig = _functions['sign'](skey, self.body)
 
+    def check_sig(self, vkey: bytes) -> bool | None:
+        """Checks if the signature is valid."""
+        if self.sig and _functions['check_sig']:
+            return _functions['check_sig'](vkey, self.body, self.sig)
+
     def to_bytes(self) -> bytes:
         """Serialize to bytes."""
         return struct.pack(
@@ -296,7 +301,7 @@ def set_sign_function(func: Callable[[bytes, bytes], bytes]) -> None:
     _functions['sign'] = func
 
 
-def set_checksig_function(func: Callable[[bytes, bytes, bytes], bool]) -> None:
+def set_check_sig_function(func: Callable[[bytes, bytes, bytes], bool]) -> None:
     """Sets a function for checking signatures. Function must take the
         public key bytes, message bytes, and signature bytes as args and
         return True if the signature is valid for the public key and
@@ -768,18 +773,28 @@ class PIETree:
     def _make_offer_assignment_msg(self, peer_id: bytes, peer_coords: list[int],
                                    parent_data: dict = {}) -> PIEMessage:
         """Create a PIEMessage that offers assignment to a peer."""
-        if 'cert' in parent_data:
-            child_cert = self.make_cert({
+        child_index = self.child_index(peer_id)
+        child_coords = self.calculate_coords(self.local_coords, child_index)
+
+        if 'use_certs' in self.config:
+            cert_data = {
                 'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
-                'coords': self.local_coords,
-                'index': self.child_index(peer_id),
-            }, base_cert=b64decode(parent_data['cert']))
+                'parent_coords': self.local_coords,
+                'coords': child_coords,
+                'index': child_index,
+                'root': b64encode(self.root).decode('utf-8')
+            }
+            if 'cert' in parent_data:
+                child_cert = self.make_cert(cert_data, base_cert=b64decode(parent_data['cert']))
+            else:
+                child_cert = self.make_cert(cert_data)
             body = PIEMsgBody(child_cert)
         else:
             body = PIEMsgBody(json.dumps({
                 'parent_id': b64encode(self.tree.node_id).decode('utf-8'),
-                'coords': self.local_coords,
-                'index': self.child_index(peer_id),
+                'parent_coords': self.local_coords,
+                'coords': child_coords,
+                'index': child_index,
                 'root': b64encode(self.root).decode('utf-8')
             }).encode('utf-8'))
         body.sign(self.skey)
@@ -803,7 +818,7 @@ class PIETree:
         cert = b64encode(json.dumps(cert).encode('utf-8'))
         sig = _functions['sign'](cert, self.skey)
         return json.dumps({
-            'data': cert,
+            'cert': cert,
             'sig': b64encode(sig).decode('utf-8')
         }).encode('utf-8')
 
@@ -1355,15 +1370,48 @@ class PIETree:
     def _handle_accept_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
         """Handle an ACCEPT_ASSIGNMENT message from new child."""
         body = json.loads(msgbody.body)
-        ...
+        if bytes.fromhex(body['parent_id']) != self.tree.node_id:
+            return
+        if 'cert' in body and 'use_certs' in self.config:
+            if not self.check_cert(body['cert']):
+                return
+            if body['cert']['parent_id'] != b64encode(self.tree.node_id).decode('utf-8'):
+                return
+        else:
+            if 'use_certs' in self.config:
+                return
+        if body['root'] != self.root:
+            return
+        self.add_child(message.src_id, body)
 
     def _handle_announce_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
         """Handle an ANNOUNCE_ASSIGNMENT message from neighbor."""
-        ...
+        body = json.loads(msgbody.body)
+        if 'cert' in body and 'use_certs' in self.config:
+            if not self.check_cert(b64decode(body['cert'])):
+                return
+            cert = json.loads(b64decode(body['cert']))
+            if cert['parent_id'] != b64encode(self.tree.node_id).decode('utf-8'):
+                return
+        else:
+            if 'use_certs' in self.config:
+                return
+        if body['root'] != self.root:
+            return
+        self.add_neighbor(message.src_id, body)
 
     def _handle_release_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
         """Handle an RELEASE_ASSIGNMENT message from child or neighbor."""
-        ...
+        body = json.loads(msgbody.body)
+        coords = body['coords'] if 'coords' in body else []
+        if msgbody.sig and not msgbody.check_sig(message.src_id):
+            return
+        if message.src_id in self.child_coords:
+            if self.child_coords[message.src_id] == coords:
+                return self.remove_child(message.src_id)
+        if message.src_id in self.neighbor_coords:
+            if self.neighbor_coords[message.src_id] == coords:
+                return self.remove_neighbor(message.src_id)
 
     def send_message(self, message: PIEMessage, peer_id: bytes,
                      peer_coords: list[int] = []) -> None:

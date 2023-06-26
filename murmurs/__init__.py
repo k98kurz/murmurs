@@ -7,7 +7,7 @@ from .pie import (
     PIEMsgType,
     PIEMessage,
     PIETree,
-    set_checksig_function,
+    set_check_sig_function,
     set_elect_root_func,
     set_sign_function,
     encode_big_coordinates,

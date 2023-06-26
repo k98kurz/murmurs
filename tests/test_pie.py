@@ -19,10 +19,10 @@ class TestPIEFunctions(unittest.TestCase):
         pie.set_sign_function(func)
         assert pie._functions['sign'] is func
 
-    def test_set_checksig_function(self):
+    def test_set_check_sig_function(self):
         func = lambda b1, b2, b3: b1==b2==b3
         assert pie._functions['check_sig'] is not func
-        pie.set_checksig_function(func)
+        pie.set_check_sig_function(func)
         assert pie._functions['check_sig'] is func
 
     def test_set_elect_root_func(self):
@@ -414,6 +414,17 @@ class TestPIEMsgBody(unittest.TestCase):
         assert msgbody.sig == b''
         msgbody.sign(b'privkey')
         assert msgbody.sig == b'privkey:some body'
+
+    def test_check_sig_works_with_set_function(self):
+        skey = b'privkey'
+        body = b'some body'
+        msgbody = pie.PIEMsgBody(body, skey + b':' + body)
+        checked = msgbody.check_sig(skey)
+        assert checked is None
+        pie.set_check_sig_function(lambda b1, b2, b3: b1 + b':' + b2 == b3)
+        checked = msgbody.check_sig(skey)
+        assert type(checked) is bool
+        assert checked
 
     def test_to_bytes_and_from_bytes_e2e(self):
         msgbody = pie.PIEMsgBody(b'some body', b'some sig')
