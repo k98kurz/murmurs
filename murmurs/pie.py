@@ -32,6 +32,8 @@ class PIEEvent(Enum):
     RECEIVE_ACCEPT_ASSIGNMENT = auto()
     RECEIVE_ANNOUNCE_ASSIGNMENT = auto()
     RECEIVE_RELEASE_ASSIGNMENT = auto()
+    RECEIVE_ERROR = auto()
+    RECEIVE_UNREACHABLE_ERROR = auto()
     SET_ROOT = auto()
     SEND_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
@@ -62,6 +64,8 @@ class PIEMsgType(Enum):
     ANNOUNCE_ASSIGNMENT = 10
     RELEASE_ASSIGNMENT = 11
     ACKNOWLEDGE_MESSAGE = 12
+    AUTH_ERROR = 13
+    UNREACHABLE_ERROR = 14
 
 
 @dataclass
@@ -321,12 +325,12 @@ def set_elect_root_func(func: Callable[[bytes, bytes, int], bool]) -> None:
     _functions['elect_root'] = func
 
 
-def set_make_auth_func(func: Callable[[bytes, bytes], bytes]) -> None:
+def set_make_auth_func(func: Callable[[bytes, bytes, bytes], bytes]) -> None:
     """Sets a function for making auth data. Function must take the
-        bytes auth config and bytes node ID as args and return bytes
-        auth data.
+        bytes auth config, bytes node ID, and bytes skey as args and
+        return bytes auth data.
     """
-    tert(callable(func), 'func must be Callable[[bytes, bytes], bytes]')
+    tert(callable(func), 'func must be Callable[[bytes, bytes, bytes], bytes]')
     _functions['make_auth'] = func
 
 
@@ -1076,9 +1080,12 @@ class PIETree:
 
     def receive_message(self, message: PIEMessage) -> None:
         """Receive a message."""
-        self.invoke_hook(PIEEvent.RECEIVE_MESSAGE, {'message': message})
-
         msgbody = PIEMsgBody.from_bytes(message.body)
+        self.invoke_hook(PIEEvent.RECEIVE_MESSAGE, {
+            'message': message,
+            'msgbody': msgbody,
+        })
+
         if msgbody.sig and _functions['check_sig']:
             if not _functions['check_sig'](message.src_id, msgbody.body, msgbody.sig):
                 return self.invoke_hook(
@@ -1189,7 +1196,7 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
-                self._handle_request_assignment(message)
+                self._handle_request_assignment(message, msgbody)
             case PIEMsgType.ACCEPT_ASSIGNMENT:
                 self.invoke_hook(
                     PIEEvent.RECEIVE_ACCEPT_ASSIGNMENT,
@@ -1225,33 +1232,59 @@ class PIETree:
                         'msgbody': msgbody
                     }
                 )
+            case PIEMsgType.AUTH_ERROR:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_ERROR,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+            case PIEMsgType.UNREACHABLE_ERROR:
+                self.invoke_hook(
+                    PIEEvent.RECEIVE_UNREACHABLE_ERROR,
+                    {
+                        'message': message,
+                        'msgbody': msgbody
+                    }
+                )
+
+    def send_hello(self, dst_id: bytes, dst: list[int] = []) -> None:
+        data = {
+            'id': self.tree.node_id.hex(),
+            'coords': self.local_coords
+        }
+        if 'auth_base' in self.config and _functions['make_auth']:
+            data['auth'] = _functions['make_auth'](self.config['auth_base'],
+                                                   self.tree.node_id,
+                                                   self.skey)
+        msgbody = PIEMsgBody(json.dumps(data).encode('utf-8'))
+        msgbody.sign(self.skey)
+        self.send_message(PIEMessage(
+            PIEMsgType.HELLO,
+            self.id,
+            dst,
+            dst_id,
+            self.local_coords,
+            self.tree.node_id,
+            msgbody.to_bytes(),
+            ttl=1
+        ), dst_id)
 
     def _handle_hello(self, message: PIEMessage, peer_id: bytes,
                       peer_info: dict) -> None:
         """Handle incoming peer information."""
         if peer_id not in self.tree.child_ids and \
             peer_id not in self.tree.neighbor_ids:
-            # respond with HELLO
-            msgbody = PIEMsgBody(json.dumps({
-                'id': self.tree.node_id.hex(),
-                'coords': self.local_coords
-            }).encode('utf-8'))
-            msgbody.sign(self.skey)
+            # respond with HELLO to new peer
             try:
-                self.send_message(PIEMessage(
-                    PIEMsgType.HELLO,
-                    self.id,
-                    message.src,
-                    message.src_id,
-                    self.local_coords,
-                    self.tree.node_id,
-                    msgbody.to_bytes(),
-                    ttl=1
-                ), message.src_id)
-                # add neighbor if reachable
+                self.send_hello(peer_id, message.dst)
                 self.add_neighbor(peer_id, peer_info)
             except UnicastException:
                 ...
+        else:
+            # update a current neighbor
+            self.add_neighbor(peer_id, peer_info)
 
     def _handle_ping(self, message: PIEMessage) -> None:
         """Responds to ping."""
@@ -1275,7 +1308,7 @@ class PIETree:
     def _handle_trace_route(self, message: PIEMessage) -> None:
         """Responds to a TRACE_ROUTE message."""
         # first see if there is a path bifurcation
-        bifurcation = None
+        bifurcation = b''
         reverse_msg = PIEMessage(PIEMsgType.DEFAULT, self.id,
                                     message.src, message.src_id,
                                     message.dst, message.dst_id, b'',
@@ -1289,6 +1322,8 @@ class PIETree:
         if bifurcation:
             if 'use_big_coords' in self.config:
                 bifurcation = encode_big_coordinates(bifurcation)
+            elif 'use_small_coords' in self.config:
+                bifurcation = encode_small_coordinates(bifurcation)
             else:
                 bifurcation = encode_coordinates(bifurcation)
         body = PIEMsgBody(bifurcation)
@@ -1307,6 +1342,8 @@ class PIETree:
         if msgbody.body:
             if 'use_big_coords' in self.config:
                 bif = decode_big_coordinates(msgbody.body)
+            elif 'use_small_coords' in self.config:
+                bif = decode_small_coordinates(msgbody.body)
             else:
                 bif = decode_coordinates(msgbody.body)
             self.route_table.add_bifurcation(
@@ -1323,6 +1360,15 @@ class PIETree:
         tert(isinstance(message, PIEMessage), 'message must be PIEMessage')
         tert(isinstance(msgbody, PIEMsgBody), 'message must be PIEMsgBody')
         data = json.loads(msgbody.body.decode('utf-8'))
+        if 'auth_base' in self.config:
+            if not _functions['check_auth']:
+                return
+            if not _functions['check_auth'](self.config['auth_base'],
+                                            message.src_id,
+                                            b64decode(data['auth'])):
+                self.send_error_message(message.src, message.src_id,
+                                        PIEMsgType.AUTH_ERROR, b'invalid auth')
+                return
         if 'use_certs' in self.config:
             tressa(callable(_functions['check_sig']), 'missing callable check_sig function')
             vert('cert' in data, 'missing cert data')
@@ -1347,8 +1393,17 @@ class PIETree:
                 if self.try_elect_root(root):
                     self.set_parent(parent_id, coords, index)
 
-    def _handle_request_assignment(self, message: PIEMessage) -> None:
+    def _handle_request_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
         """Handle an assignment request."""
+        body = json.loads(msgbody.body)
+        if 'auth_base' in self.config:
+            if not _functions['check_auth'] or 'auth' not in body:
+                return
+            if not _functions['check_auth'](self.config['auth_base'],
+                                            message.src_id,
+                                            b64decode(body['auth'])):
+                self.send_error_message(message.src, message.src_id, b'invalid auth')
+                return
         if 'use_certs' in self.config:
             msg = self._make_offer_assignment_msg(
                 message.src_id, message.src, {
@@ -1387,6 +1442,14 @@ class PIETree:
     def _handle_announce_assignment(self, message: PIEMessage, msgbody: PIEMsgBody) -> None:
         """Handle an ANNOUNCE_ASSIGNMENT message from neighbor."""
         body = json.loads(msgbody.body)
+        if 'auth_base' in self.config:
+            if not _functions['check_auth'] or 'auth' not in body:
+                return
+            if not _functions['check_auth'](self.config['auth_base'],
+                                            message.src_id,
+                                            b64decode(body['auth'])):
+                self.send_error_message(message.src, message.src_id, b'invalid auth')
+                return
         if 'cert' in body and 'use_certs' in self.config:
             if not self.check_cert(b64decode(body['cert'])):
                 return
@@ -1412,6 +1475,23 @@ class PIETree:
         if message.src_id in self.neighbor_coords:
             if self.neighbor_coords[message.src_id] == coords:
                 return self.remove_neighbor(message.src_id)
+
+    def send_error_message(self, dst: list[int], dst_id: bytes,
+                           msgtype: PIEMsgType, msg: bytes = b'') -> None:
+        """Send an error message to the given destination."""
+        msgbody = PIEMsgBody(msg)
+        msgbody.sign(self.skey)
+        message = PIEMessage(
+            msgtype,
+            self.id,
+            dst,
+            dst_id,
+            self.local_coords,
+            self.tree.node_id,
+            msgbody.to_bytes(),
+            bifurcations=self.route_table.get_bifurcations(self.id, dst)
+        )
+        self.route_message(message)
 
     def send_message(self, message: PIEMessage, peer_id: bytes,
                      peer_coords: list[int] = []) -> None:

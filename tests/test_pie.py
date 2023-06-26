@@ -1,4 +1,6 @@
 from context import errors, pie, spanningtree
+from nacl.signing import SigningKey, VerifyKey
+from secrets import token_bytes
 import unittest
 
 
@@ -464,7 +466,7 @@ class TestPIEMsgBody(unittest.TestCase):
         assert decoded.sig == msgbody.sig == b''
 
 
-class Sender:
+class FakeSender:
     sent: list[pie.PIEMessage]
     def __init__(self) -> None:
         self.sent = []
@@ -473,7 +475,28 @@ class Sender:
         return True
 
 
+class Sender:
+    trees: list[pie.PIETree]
+    def __init__(self) -> None:
+        self.trees = []
+    def unicast(self, message: pie.PIEMessage, dst: bytes, route_data: dict = None) -> bool:
+        for tree in self.trees:
+            if tree.tree.node_id == dst:
+                tree.receive_message(message)
+                return True
+        return False
+
+
 class TestPIETree(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._functions = {**pie._functions}
+        return super().setUpClass()
+
+    def tearDown(cls) -> None:
+        pie._functions = cls._functions
+        return super().tearDown()
+
     def test_set_hook_replaces_hook(self):
         tree = pie.PIETree()
         signal = {}
@@ -544,7 +567,7 @@ class TestPIETree(unittest.TestCase):
         assert str(e.exception) == f'could not unicast to peer_id={peer_id.hex()}'
 
     def test_add_sender_causes_sender_unicast_to_be_invoked_on_send(self):
-        sender = Sender()
+        sender = FakeSender()
         tree = pie.PIETree()
         peer_id = b'some node'
         dst = [-2, 1]
@@ -579,7 +602,7 @@ class TestPIETree(unittest.TestCase):
             return data
 
         tree = pie.PIETree()
-        tree.add_sender(Sender())
+        tree.add_sender(FakeSender())
         tree.add_hook(pie.PIEEvent.BEFORE_SET_PARENT, hook1)
         tree.add_hook(pie.PIEEvent.AFTER_SET_PARENT, hook3)
         tree.tree.add_hook(spanningtree.SpanningTreeEvent.BEFORE_SET_PARENT, hook2)
@@ -599,7 +622,7 @@ class TestPIETree(unittest.TestCase):
 
     def test_set_parent_sends_messages(self):
         tree = pie.PIETree()
-        sender = Sender()
+        sender = FakeSender()
         tree.add_sender(sender)
         tree.local_coords = [2, -1]
 
@@ -644,6 +667,60 @@ class TestPIETree(unittest.TestCase):
         assert n_sent_to_parent == 1
         assert n_sent_to_children == 2
         assert n_sent_to_neighbors == 3
+
+    def test_small_network_construction_e2e(self):
+        """Tests a network with this structure:
+            node 0 connects to 1 and 2
+            node 1 connects to 0 and 3
+            node 2 connects to 0 and 3
+            node 3 connects to 1 and 2
+        """
+        def distance(b1: bytes, b2: bytes) -> int:
+            while len(b1) > len(b2):
+                b2 = b2 + b'\x00'
+            while len(b2) > len(b1):
+                b1 = b1 + b'\x00'
+            diff = 0
+            for i in range(len(b1)):
+                diff += b1[i] ^ b2[i]
+            return diff
+
+        def elect_root(current: bytes, candidate: bytes, locality_level: int):
+            target = bytes.fromhex('df9908d772d0d0345a58ef0e8b5188e62d7b85a392428155af7c83a37c1af2f8')
+            return distance(candidate, target) < distance(current, target)
+
+        def sign(skey: bytes, msg: bytes) -> bytes:
+            return SigningKey(skey).sign(msg)[:64]
+
+        def check_sig(vkey: bytes, msg: bytes, sig: bytes) -> bool:
+            try:
+                VerifyKey(vkey).verify(msg, sig)
+                return True
+            except:
+                return False
+
+        pie.set_elect_root_func(elect_root)
+        pie.set_sign_function(sign)
+        pie.set_check_sig_function(check_sig)
+
+        node_skeys = [
+            bytes.fromhex('d84fb53be55ec5ee671bc638da27e1afc08eb675a1d43edb39614c4c4922adbb'),
+            bytes.fromhex('4fced22f2809448393ca63e34612daf67eb0480522d1f94299c906e51ad1560f'),
+            bytes.fromhex('a1b42ee0db9cd6838febc35e6125f78b0c92fed07cfaa7b32d81eac11a18e1b6'),
+            bytes.fromhex('22fb681265056986ebe6008e4baff6ff90613a42204adee9a01e3ac52ff256b6'),
+        ]
+        node_ids = [bytes(SigningKey(nsk).verify_key) for nsk in node_skeys]
+        config = {'use_certs': True}
+        trees = []
+        sender = Sender()
+
+        for nid in node_ids:
+            tree = pie.PIETree(b'test', config, skey=nid, node_id=nid)
+            tree.add_sender(sender)
+            trees.append(tree)
+            sender.trees.append(tree)
+
+        ...
 
 
 if __name__ == '__main__':
