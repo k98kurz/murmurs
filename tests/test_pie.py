@@ -1,4 +1,6 @@
+from base64 import b64encode, b64decode
 from context import errors, pie, spanningtree
+from hashlib import sha256
 from nacl.signing import SigningKey, VerifyKey
 from secrets import token_bytes
 import unittest
@@ -475,16 +477,24 @@ class FakeSender:
         return True
 
 
-class Sender:
+class UnicastSender:
     trees: list[pie.PIETree]
     def __init__(self) -> None:
         self.trees = []
     def unicast(self, message: pie.PIEMessage, dst: bytes, route_data: dict = None) -> bool:
         for tree in self.trees:
-            if tree.tree.node_id == dst:
-                tree.receive_message(message)
-                return True
-        return False
+            tree.receive_message(message)
+        return True
+
+
+class MulticastSender:
+    trees: list[pie.PIETree]
+    def __init__(self) -> None:
+        self.trees = []
+    def multicast(self, message: pie.PIEMessage) -> bool:
+        for tree in self.trees:
+            tree.receive_message(message)
+        return True
 
 
 class TestPIETree(unittest.TestCase):
@@ -686,6 +696,8 @@ class TestPIETree(unittest.TestCase):
             return diff
 
         def elect_root(current: bytes, candidate: bytes, locality_level: int):
+            if not current:
+                return True
             target = bytes.fromhex('df9908d772d0d0345a58ef0e8b5188e62d7b85a392428155af7c83a37c1af2f8')
             return distance(candidate, target) < distance(current, target)
 
@@ -699,9 +711,17 @@ class TestPIETree(unittest.TestCase):
             except:
                 return False
 
+        def make_auth(base: bytes, node_id: bytes, skey: bytes = b'') -> bytes:
+            return sha256(base + node_id).digest()[:8]
+
+        def check_auth(base: bytes, node_id: bytes, data: bytes) -> bytes:
+            return data == sha256(base + node_id).digest()[:8]
+
         pie.set_elect_root_func(elect_root)
         pie.set_sign_function(sign)
         pie.set_check_sig_function(check_sig)
+        pie.set_make_auth_func(make_auth)
+        pie.set_check_auth_func(check_auth)
 
         node_skeys = [
             bytes.fromhex('d84fb53be55ec5ee671bc638da27e1afc08eb675a1d43edb39614c4c4922adbb'),
@@ -710,17 +730,52 @@ class TestPIETree(unittest.TestCase):
             bytes.fromhex('22fb681265056986ebe6008e4baff6ff90613a42204adee9a01e3ac52ff256b6'),
         ]
         node_ids = [bytes(SigningKey(nsk).verify_key) for nsk in node_skeys]
-        config = {'use_certs': True}
-        trees = []
-        sender = Sender()
+        config = {
+            'use_certs': True,
+            'auth_base': b64encode(b'1234').decode('utf-8')
+        }
+        trees = [
+            pie.PIETree(config=config, skey=node_skeys[i], node_id=node_ids[i])
+            for i in range(len(node_ids))
+        ]
+        senders = [UnicastSender() for _ in node_ids]
+        multicasters = [MulticastSender() for _ in node_ids]
 
-        for nid in node_ids:
-            tree = pie.PIETree(b'test', config, skey=nid, node_id=nid)
-            tree.add_sender(sender)
-            trees.append(tree)
-            sender.trees.append(tree)
+        # node 0 connects to 1 and 2
+        senders[0].trees.append(trees[1])
+        senders[0].trees.append(trees[2])
+        multicasters[0].trees.append(trees[1])
+        multicasters[0].trees.append(trees[2])
+        # node 1 connects to 0 and 3
+        senders[1].trees.append(trees[0])
+        senders[1].trees.append(trees[3])
+        multicasters[1].trees.append(trees[0])
+        multicasters[1].trees.append(trees[3])
+        # node 2 connects to 0 and 3
+        senders[2].trees.append(trees[0])
+        senders[2].trees.append(trees[3])
+        multicasters[2].trees.append(trees[0])
+        multicasters[2].trees.append(trees[3])
+        # node 3 connects to 1 and 2
+        senders[3].trees.append(trees[1])
+        senders[3].trees.append(trees[2])
+        multicasters[3].trees.append(trees[1])
+        multicasters[3].trees.append(trees[2])
 
-        ...
+        # elect each as root independently
+        for tree in trees:
+            tree.try_elect_root(tree.tree.node_id)
+
+        # announce for peer discovery
+        for i in range(len(trees)):
+            message = trees[i].make_hello()
+            multicasters[i].multicast(message)
+
+        # attempt to equalize network with rounds of communication
+        # for _ in range(5):
+        #     for tree in trees:
+        #         # anounce current config to each peer
+        #         tree.multicast(tree.make_hello())
 
 
 if __name__ == '__main__':

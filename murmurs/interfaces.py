@@ -23,3 +23,13 @@ class CanUnicast(Protocol):
             otherwise.
         """
         ...
+
+
+@runtime_checkable
+class CanMulticast(Protocol):
+    """Interface for classes that can handle multicast message sending."""
+    def multicast(self, message: Any, dst: Any) -> bool:
+        """Returns True if the message can be sent to the multicast dst
+            and False otherwise.
+        """
+        ...

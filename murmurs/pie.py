@@ -1,6 +1,6 @@
 from __future__ import annotations
 from .errors import tert, vert, tressa, UnicastException
-from .interfaces import CanJsonSerialize, CanUnicast
+from .interfaces import CanJsonSerialize, CanUnicast, CanMulticast
 from .spanningtree import LocalTree
 from base64 import b64decode, b64encode
 from dataclasses import dataclass, field
@@ -36,6 +36,7 @@ class PIEEvent(Enum):
     RECEIVE_UNREACHABLE_ERROR = auto()
     SET_ROOT = auto()
     SEND_MESSAGE = auto()
+    MULTICAST_MESSAGE = auto()
     ROUTE_MESSAGE = auto()
     BEFORE_SET_PARENT = auto()
     AFTER_SET_PARENT = auto()
@@ -83,12 +84,17 @@ class PIEMessage:
     seq: int = field(default=0)
     last_hop: list[int] = field(default=None)
 
-    def encode_header(self, use_big_coords: bool = False) -> bytes:
+    def encode_header(self, use_big_coords: bool = False,
+                      use_small_coords: bool = False) -> bytes:
         """Serialize header information to bytes."""
         if use_big_coords:
             src = encode_big_coordinates(self.src)
             dst = encode_big_coordinates(self.dst)
             bifurcations = [encode_big_coordinates(b) for b in self.bifurcations]
+        elif use_small_coords:
+            src = encode_small_coordinates(self.src)
+            dst = encode_small_coordinates(self.dst)
+            bifurcations = [encode_small_coordinates(b) for b in self.bifurcations]
         else:
             src = encode_coordinates(self.src)
             dst = encode_coordinates(self.dst)
@@ -555,7 +561,8 @@ class SrcAidedRouteTable:
     """Route table for storing bifurcations detected during trace routes
         initiated by the local node. Does not store bifurcations for
     """
-    bifurcations: dict[tuple[bytes, list[int]], tuple[int, list[list[int]]]] = field(default_factory=dict)
+    bifurcations: dict[tuple[bytes, bytes], tuple[int, list[list[int]]]] = field(default_factory=dict)
+    encode_coords: Callable[[list[int]], bytes] = field(default=encode_coordinates)
 
     def set_bifurcations(self, tree_id: bytes, dst: list[int], bifurcations: list[list[int]]) -> None:
         """Set bifurcations for a destination on a tree."""
@@ -563,14 +570,19 @@ class SrcAidedRouteTable:
         tert(type(dst) is list, 'dst must be list of ints')
         tert(all(type(coord) is int for coord in dst), 'dst must be list of ints')
         tert(type(bifurcations) is list, 'bifurcations must be list[list[int]]')
-        self.bifurcations[(tree_id.hex(), dst)] = bifurcations
+        self.bifurcations[(tree_id.hex(), self.encode_coords(dst))] = bifurcations
 
-    def get_bifurcations(self, tree_id: bytes, dst: list[int]) -> list[list[int]]:
+    def get_bifurcations(self, tree_id: bytes, dst: list[int] | bytes) -> list[list[int]]:
         """Get the bifurcations for a destination on a tree."""
         tert(type(tree_id) is bytes, 'tree_id must be bytes')
-        tert(type(dst) is list, 'dst must be list of ints')
-        tert(all(type(coord) is int for coord in dst), 'dst must be list of ints')
-        return self.bifurcations[(tree_id.hex(), dst)] if (tree_id.hex(), dst) in self.bifurcations else []
+        tert(type(dst) in (list, bytes),
+             'dst must be list of ints or bytes encoding')
+        if type(dst) is list:
+            tert(all(type(coord) is int for coord in dst),
+                 'dst must be list of ints or bytes encoding')
+        if (tree_id.hex(), self.encode_coords(dst)) in self.bifurcations:
+            return self.bifurcations[(tree_id.hex(), self.encode_coords(dst))]
+        return []
 
     def add_bifurcation(self, tree_id: bytes, dst: list[int], bifurcation: list[int]) -> None:
         """Adds a bifurcation."""
@@ -600,7 +612,7 @@ class PIETree:
     assignment_cert: bytes
     child_coords: dict[bytes, list[int]]
     neighbor_coords: dict[bytes, list[int]]
-    senders: list[CanUnicast]
+    senders: list[CanUnicast | CanMulticast]
     hooks: dict[str, Callable]
     route_table: SrcAidedRouteTable
 
@@ -635,7 +647,12 @@ class PIETree:
         self.neighbor_coords = neighbor_coords or {}
         self.senders = []
         self.hooks = {}
-        self.route_table = route_table or SrcAidedRouteTable()
+        if route_table:
+            self.route_table = route_table
+        else:
+            self.route_table = SrcAidedRouteTable(
+                encode_coords=lambda coords: self._encode_coords(coords)
+            )
 
     def set_hook(self, event: PIEEvent,
                  func: Callable[[PIEEvent, dict], dict]) -> None:
@@ -1078,6 +1095,24 @@ class PIETree:
                 return True
         return False
 
+    def _encode_coords(self, coords: list[int]) -> bytes:
+        """Encode the coords using the correct format."""
+        if 'use_big_coords' in self.config:
+            return encode_big_coordinates(coords)
+        elif 'use_small_coords' in self.config:
+            return encode_small_coordinates(coords)
+        else:
+            return encode_coordinates(coords)
+
+    def _decode_coords(self, coords: bytes) -> list[int]:
+        """Decode the coords using the correct format."""
+        if 'use_big_coords' in self.config:
+            return decode_big_coordinates(coords)
+        elif 'use_small_coords' in self.config:
+            return decode_small_coordinates(coords)
+        else:
+            return decode_coordinates(coords)
+
     def receive_message(self, message: PIEMessage) -> None:
         """Receive a message."""
         msgbody = PIEMsgBody.from_bytes(message.body)
@@ -1104,16 +1139,19 @@ class PIETree:
         if message.msg_type is not PIEMsgType.ACKNOWLEDGE_MESSAGE:
             rsp_body = PIEMsgBody(message.body_id())
             rsp_body.sign(self.skey)
-            self.route_message(PIEMessage(
-                PIEMsgType.ACKNOWLEDGE_MESSAGE,
-                self.id,
-                message.src,
-                peer_id,
-                self.local_coords,
-                self.tree.node_id,
-                rsp_body.to_bytes(),
-                bifurcations=self.route_table.get_bifurcations(self.id, message.src)
-            ))
+            try:
+                self.route_message(PIEMessage(
+                    PIEMsgType.ACKNOWLEDGE_MESSAGE,
+                    self.id,
+                    message.src,
+                    peer_id,
+                    self.local_coords,
+                    self.tree.node_id,
+                    rsp_body.to_bytes(),
+                    bifurcations=self.route_table.get_bifurcations(self.id, message.src)
+                ))
+            except:
+                ...
 
         # handle protocol events
         match message.msg_type:
@@ -1249,18 +1287,24 @@ class PIETree:
                     }
                 )
 
-    def send_hello(self, dst_id: bytes, dst: list[int] = []) -> None:
+    def make_hello(self, dst_id: bytes = b'', dst: list[int] = []) -> None:
+        """Make a a message for HELLO type messages to introduce a node
+            to peers.
+        """
         data = {
             'id': self.tree.node_id.hex(),
             'coords': self.local_coords
         }
         if 'auth_base' in self.config and _functions['make_auth']:
-            data['auth'] = _functions['make_auth'](self.config['auth_base'],
-                                                   self.tree.node_id,
-                                                   self.skey)
+            data['auth'] = _functions['make_auth'](
+                b64decode(self.config['auth_base']),
+                self.tree.node_id,
+                self.skey
+            )
+            data['auth'] = b64encode(data['auth']).decode('utf-8')
         msgbody = PIEMsgBody(json.dumps(data).encode('utf-8'))
         msgbody.sign(self.skey)
-        self.send_message(PIEMessage(
+        return PIEMessage(
             PIEMsgType.HELLO,
             self.id,
             dst,
@@ -1269,16 +1313,29 @@ class PIETree:
             self.tree.node_id,
             msgbody.to_bytes(),
             ttl=1
-        ), dst_id)
+        )
+
+    def send_hello(self, dst_id: bytes = b'', dst: list[int] = []) -> None:
+        self.send_message(self.make_hello(dst_id, dst), dst_id, dst)
 
     def _handle_hello(self, message: PIEMessage, peer_id: bytes,
                       peer_info: dict) -> None:
         """Handle incoming peer information."""
         if peer_id not in self.tree.child_ids and \
             peer_id not in self.tree.neighbor_ids:
-            # respond with HELLO to new peer
+            if 'auth' not in peer_info:
+                return
             try:
-                self.send_hello(peer_id, message.dst)
+                if 'auth_base' in self.config and _functions['check_auth']:
+                    has_valid_auth = _functions['check_auth'](
+                        b64decode(self.config['auth_base']),
+                        peer_id,
+                        b64decode(peer_info['auth'])
+                    )
+                    if not has_valid_auth:
+                        return
+                # respond with HELLO to new peer
+                self.send_message(self.make_hello(peer_id, message.dst), peer_id)
                 self.add_neighbor(peer_id, peer_info)
             except UnicastException:
                 ...
@@ -1320,12 +1377,7 @@ class PIETree:
 
         # then send a TRACE_ROUTE_ECHO to src
         if bifurcation:
-            if 'use_big_coords' in self.config:
-                bifurcation = encode_big_coordinates(bifurcation)
-            elif 'use_small_coords' in self.config:
-                bifurcation = encode_small_coordinates(bifurcation)
-            else:
-                bifurcation = encode_coordinates(bifurcation)
+            bifurcation = self._encode_coords(bifurcation)
         body = PIEMsgBody(bifurcation)
         body.sign(self.skey)
         seq = message.seq + 255 - message.ttl
@@ -1363,9 +1415,11 @@ class PIETree:
         if 'auth_base' in self.config:
             if not _functions['check_auth']:
                 return
-            if not _functions['check_auth'](self.config['auth_base'],
-                                            message.src_id,
-                                            b64decode(data['auth'])):
+            if not _functions['check_auth'](
+                b64decode(self.config['auth_base']),
+                message.src_id,
+                b64decode(data['auth'])
+            ):
                 self.send_error_message(message.src, message.src_id,
                                         PIEMsgType.AUTH_ERROR, b'invalid auth')
                 return
@@ -1399,9 +1453,11 @@ class PIETree:
         if 'auth_base' in self.config:
             if not _functions['check_auth'] or 'auth' not in body:
                 return
-            if not _functions['check_auth'](self.config['auth_base'],
-                                            message.src_id,
-                                            b64decode(body['auth'])):
+            if not _functions['check_auth'](
+                b64decode(self.config['auth_base']),
+                message.src_id,
+                b64decode(body['auth'])
+            ):
                 self.send_error_message(message.src, message.src_id, b'invalid auth')
                 return
         if 'use_certs' in self.config:
@@ -1445,9 +1501,11 @@ class PIETree:
         if 'auth_base' in self.config:
             if not _functions['check_auth'] or 'auth' not in body:
                 return
-            if not _functions['check_auth'](self.config['auth_base'],
-                                            message.src_id,
-                                            b64decode(body['auth'])):
+            if not _functions['check_auth'](
+                b64decode(self.config['auth_base']),
+                message.src_id,
+                b64decode(body['auth'])
+            ):
                 self.send_error_message(message.src, message.src_id, b'invalid auth')
                 return
         if 'cert' in body and 'use_certs' in self.config:
@@ -1506,10 +1564,24 @@ class PIETree:
         )
 
         for sender in self.senders:
-            if sender.unicast(message, peer_id):
-                return
+            if isinstance(sender, CanUnicast):
+                if sender.unicast(message, peer_id, peer_coords):
+                    return
 
         raise UnicastException(peer_id)
+
+    def multicast(self, message: PIEMessage) -> None:
+        """Multicast a message to all subscribed peers."""
+        self.invoke_hook(
+            PIEEvent.MULTICAST_MESSAGE,
+            {
+                'message': message,
+            }
+        )
+
+        for sender in self.senders:
+            if isinstance(sender, CanMulticast):
+                sender.multicast(message)
 
     @staticmethod
     def calculate_distance(coords1: list[int], coords2: list[int]) -> int:
